@@ -136,6 +136,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_LOGGER:-https://github.com/exemt/placitum-logger.git#main}
+    image: placitum/logger
     environment:
       <<: *bus
       WAF_LOGGER_LOG: info
@@ -159,8 +160,8 @@ services:
   # в него ходит контроллер.
   search:
     <<: *resources
-    build:
-      context: ${PLC_SRC_LOGGER:-https://github.com/exemt/placitum-logger.git#main}
+    # Образ тот же, что у logger: собирает его тот сервис, здесь только тег.
+    image: placitum/logger
     command: ["waf-search"]
     environment:
       <<: *bus

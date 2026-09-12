@@ -194,7 +194,7 @@ services:
   minio:
     <<: *resources
     mem_limit: 2g
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: ["server", "/data", "--console-address", ":9001"]
     hostname: minio
     environment:
@@ -232,7 +232,7 @@ services:
   # вовремя.
   minio-mc:
     <<: *resources
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     # Сначала правила, потом sleep: агенту и поиску они нужны с первого PUT.
     # Сентинел -- чтобы healthy означало "правила стоят", а не "контейнер жив".
     entrypoint: ["sh", "-c",
