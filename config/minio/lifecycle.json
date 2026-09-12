@@ -1,0 +1,28 @@
+{
+  "Rules": [
+    {
+      "ID": "waf-retain-ttl-604800",
+      "Status": "Enabled",
+      "Filter": { "Tag": { "Key": "waf-retain-ttl", "Value": "604800" } },
+      "Expiration": { "Days": 7 }
+    },
+    {
+      "ID": "waf-retain-ttl-3600",
+      "Status": "Enabled",
+      "Filter": { "Tag": { "Key": "waf-retain-ttl", "Value": "3600" } },
+      "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "waf-retain-ttl-600",
+      "Status": "Enabled",
+      "Filter": { "Tag": { "Key": "waf-retain-ttl", "Value": "600" } },
+      "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "waf-retain-ttl-15",
+      "Status": "Enabled",
+      "Filter": { "Tag": { "Key": "waf-retain-ttl", "Value": "15" } },
+      "Expiration": { "Days": 1 }
+    }
+  ]
+}

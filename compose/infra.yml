@@ -1,0 +1,258 @@
+# Фундамент контура: инфраструктура и её бутстрап. Своих образов здесь нет --
+# ClickHouse, NATS, Redis, Postgres и MinIO берутся официальные, core даёт им
+# конфигурацию, потоки и порядок запуска.
+#
+# Файл подключается к установке через include (docs/repos.md):
+#
+#     include:
+#       - ../core/compose/infra.yml
+#
+# Так его включает стенд (deploy/docker-compose.yml), дописывая сверху то, что
+# нужно только ему: схему контроллера в initdb у postgres и каталог прогонов у
+# nats-box. Поднять одну инфраструктуру, без компонентов:
+#
+#     docker compose -f core/compose/infra.yml up -d --wait
+#
+# Пути внутри файла считаются от его каталога -- так их разрешает include.
+
+# Потолок на контейнер, общий с установкой: две «ядра» -- квота CFS, а не
+# cpuset. Сервисы, которым этого мало, переопределяют его у себя.
+x-resources: &resources
+  cpus: "2.0"
+  mem_limit: 1g
+
+services:
+
+  nats:
+    # Шесть ядер вместо двух из x-resources. Замер 09.09.2026: под цепочкой из
+    # десяти инспекторов шина шла на 140% из двухсот, и это давало p50 378 мс
+    # при ожидании самих инспекторов в 6 мс -- десять последовательных обменов
+    # на запрос умножают её очередь на десять. С шестью ядрами тот же прогон
+    # дал p50 14 мс и полный план по темпу.
+    cpus: "6.0"
+    <<: *resources
+    image: nats:2.12-alpine
+    command: ["--config", "/etc/nats/nats-server.conf"]
+    ports:
+      - "4222:4222"   # клиенты
+      - "8222:8222"   # мониторинг: /healthz, /varz, /connz
+    volumes:
+      - ../config/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+
+  # Бутстрап шины и клиент NATS под рукой. Потоки JetStream обязаны
+  # существовать до первой публикации: потребители к ним подключаются
+  # (BindStream), но не создают -- логгер без WAF_AUDIT не стартует вовсе.
+  #
+  # Он же остаётся жить для exec: клиента шины нет ни в одном другом
+  # контейнере, а смотреть потоки и публиковать руками надо регулярно.
+  #
+  #     docker compose exec -T nats-box nats stream ls
+  nats-box:
+    <<: *resources
+    image: natsio/nats-box:latest
+    # Сначала WAF_AUDIT, потом sleep: без потока PUB на waf.audit.> не
+    # сохраняется. Скрипт идемпотентен, его же можно гонять через exec.
+    entrypoint: ["sh", "-c", "sh /etc/waf/streams.sh; exec sleep infinity"]
+    environment:
+      NATS_URL: nats://nats:4222
+    volumes:
+      - ../bootstrap:/etc/waf:ro
+      # Место для каталога установки: стенд подкладывает сюда свои прогоны
+      # (WAF_NATS_BOX_MOUNT), в чистом core здесь пусто.
+      - ${WAF_NATS_BOX_MOUNT:-./empty}:/t:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nats", "stream", "info", "WAF_AUDIT"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+  # База контроллера, не горячего пути. Модуль в postgres не ходит: сюда
+  # кладутся серверы, пути, апстримы и ссылки store:<uuid>.
+  #
+  # Схему core не возит: её объявляет владелец данных -- контроллер. Стенд
+  # подкладывает её в initdb своим блоком (deploy/docker-compose.yml), и это
+  # работает только на пустом томе; накатчика миграций у контроллера нет --
+  # см. ../migrate/README.md.
+  postgres:
+    <<: *resources
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-waf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waf}
+      POSTGRES_DB: ${POSTGRES_DB:-waf}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Схему объявляет владелец данных, а не core. Установка подкладывает
+      # сюда свой каталог миграций переменной WAF_PG_INITDB (пути считаются
+      # от этого файла); по умолчанию -- пустой каталог.
+      - ${WAF_PG_INITDB:-./empty}:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waf} -d ${POSTGRES_DB:-waf}"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+
+  # Хранилище аудита. Логгер пишет батчами, модуль сюда не ходит.
+  # 2 ГБ: дефолтный 1 ГБ из x-resources ClickHouse не переживёт.
+  clickhouse:
+    cpus: "2.0"
+    mem_limit: 2g
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # native
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      # Журнал сервера -- только stdout, уровнем отсюда (clickhouse/logger.xml).
+      # Образ по умолчанию писал trace в файлы слоя контейнера. Отладка -- тот
+      # же ключ: information, debug, trace.
+      CLICKHOUSE_LOG_LEVEL: ${CLICKHOUSE_LOG_LEVEL:-warning}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ../config/clickhouse/logger.xml:/etc/clickhouse-server/config.d/logger.xml:ro
+      - ../config/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "${CLICKHOUSE_USER:-waf}",
+             "--password", "${CLICKHOUSE_PASSWORD:-waf}", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  # Боевой обменник: только объекты запроса по локаторам waf_store
+  # (<node>:<rid>:req|:hdr|:arg, копии модификатора :rsp:out, пробы
+  # healthcheck инспекторов). Кто и что сюда пишет -- docs/deploy/README.md#redis.
+  redis:
+    <<: *resources
+    mem_limit: 2560m
+    image: redis:7.4-alpine
+    # noeviction, а не значение по умолчанию: тихое вытеснение ключа под
+    # памятью означает тихое отключение проверки тела -- см.
+    # docs/body-storage.md#redis. Модуль удаляет ключ сразу после вердикта, а TTL
+    # в waf_store страхует от падения воркера между размещением и удалением.
+    # 2g данных + запас cgroup: процесс чуть больше maxmemory.
+    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 3s
+
+  # Внутренний Redis контура: доставка конфигов и состояние инспекторов.
+  # Кто сюда ходит: контроллер кладёт блобы поколений (waf.blob.<sha256>),
+  # края, modsec и ip их забирают; капча и счётчик держат корзины (cap:bkt:*,
+  # cnt:*), калитки -- роастер (cap:*, auth:*: нонсы, отказы, отзыв, картинки
+  # виджета). Обменник сюда не заглядывает, и модуль про этот экземпляр не знает.
+  #
+  # Адрес знают так: инспекторы и края -- блок redis { url; internal } в своём
+  # inspector.conf / agent.conf (одна форма; env REDIS_URL и REDIS_INTERNAL_URL
+  # перекрывают), контроллер -- CONTROLLER_REDIS_INTERNAL_URL ниже.
+  #
+  # 512 МБ на контейнер, 400 МБ данных: блобы поколения -- единицы мегабайт,
+  # корзины и нонсы живут секундами-минутами. noeviction по той же причине,
+  # что у обменника: вытесненный блоб -- нода, которая не соберёт поколение,
+  # вытесненная корзина -- счёт, который врёт. Лучше громкий OOM-ответ.
+  redis-internal:
+    <<: *resources
+    mem_limit: 512m
+    image: redis:7.4-alpine
+    command: ["redis-server", "--maxmemory", "400mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 3s
+
+  # Локальный S3: роль архива, не горячий путь. API внутри сети :9000,
+  # на хосте :9002 — :9000 занят native-портом ClickHouse. Консоль — :9001.
+  minio:
+    <<: *resources
+    mem_limit: 2g
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    hostname: minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-waf}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wafwafwaf}
+      # fastest на сотнях тысяч объектов жрал диск во время combo:
+      # PUT архива вставал, nginx клинил даже GET /ip/, k6 не выходил.
+    ports:
+      - "9002:9000"   # S3 API
+      - "9001:9001"   # консоль
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+      start_period: 8s
+
+  # Клиент архива: ставит правила удаления и остаётся под рукой для разбора
+  # того, что в бакетах лежит.
+  #
+  #     docker compose exec -T minio-mc mc ls --recursive waf/waf-bodies
+  #     docker compose exec -T minio-mc mc stat waf/waf-bodies/<ключ>
+  #
+  # Правила -- не только уборка. С ними хранилище называет срок объекта в
+  # x-amz-expiration, агент переносит его в локатор записи, и карточка по нему
+  # отвечает "удалён по сроку хранения", не ходя в S3 за пустотой. Без правил
+  # срока в записи нет: сам объект о своём сроке ничего не знает.
+  #
+  # Сроки стенда -- ttl=7d, 1h, 10m и 15s (nginx.conf), на проводе и в теге объекта
+  # секундами. Первый ложится в правило как есть, остальным достаётся сутки:
+  # мельче в lifecycle не выразить, там только целые дни. Для стенда это
+  # неважно -- проверяется, что срок доехал до записи, а не что объект исчез
+  # вовремя.
+  minio-mc:
+    <<: *resources
+    image: minio/mc:latest
+    # Сначала правила, потом sleep: агенту и поиску они нужны с первого PUT.
+    # Сентинел -- чтобы healthy означало "правила стоят", а не "контейнер жив".
+    entrypoint: ["sh", "-c",
+                 "sh /etc/waf/lifecycle.sh && touch /tmp/ready; exec sleep infinity"]
+    environment:
+      MC_HOST_waf: http://${MINIO_ROOT_USER:-waf}:${MINIO_ROOT_PASSWORD:-wafwafwaf}@minio:9000
+    volumes:
+      - ../config/minio:/etc/waf:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+volumes:
+  nats-data:
+  postgres-data:
+  clickhouse-data:
+  minio-data:

@@ -1,0 +1,26 @@
+<!--
+  Журнал ClickHouse: в stdout контейнера, а не в файлы.
+
+  Образ по умолчанию пишет /var/log/clickhouse-server/clickhouse-server.log и
+  .err.log уровнем trace, с ротацией по гигабайту, прямо в слой контейнера. На
+  стенде это набежало в 1.6 ГБ файлов, которых не видел никто, кроме vhdx
+  Docker. Файлы сняты, остаётся консоль: docker compose logs clickhouse.
+
+  Уровень берётся из CLICKHOUSE_LOG_LEVEL (compose, по умолчанию warning).
+  Отладка: тот же ключ, information, debug или trace. Уже на information сервер
+  пишет строку на каждый запрос логгера и поиска.
+
+  В waf.log этот журнал не едет: ClickHouse и есть хранилище журнала, и строка
+  о вставке, отправленная туда же, замкнулась бы в петлю.
+
+  Внимание: двойной дефис внутри XML-комментария запрещён, сервер с ним не
+  стартует (SAXParseException). Тире здесь только длинное или никакое.
+-->
+<clickhouse>
+    <logger>
+        <level from_env="CLICKHOUSE_LOG_LEVEL"/>
+        <console>1</console>
+        <log remove="1"/>
+        <errorlog remove="1"/>
+    </logger>
+</clickhouse>

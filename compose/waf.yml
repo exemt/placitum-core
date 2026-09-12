@@ -1,0 +1,389 @@
+# Установка Placitum: инфраструктура плюс компоненты, собранные из исходников.
+#
+#     ../install.sh install          всё по шагам: проверки, секреты, запуск
+#     docker compose -f waf.yml up -d --build --wait
+#
+# Откуда берутся исходники, задаёт sources.env: git-URL с веткой или тегом либо
+# путь на диске. Готовых образов установка не качает -- собирает у себя
+# (docs/delivery.md, «Модель поставки»).
+#
+# Инфраструктура приходит из infra.yml как есть: переопределять её сервисы
+# нельзя, свои значения она принимает переменными (core/README.md).
+
+name: placitum
+
+include:
+  - path: infra.yml
+
+x-resources: &resources
+  cpus: "2.0"
+  mem_limit: 1g
+  restart: unless-stopped
+
+# Адреса контура -- одни на всех, по цепочке из docs/env.md: контурная
+# переменная называется без имени процесса, персональное переопределение
+# (WAF_<КОМПОНЕНТ>_...) остаётся возможным и здесь не используется.
+x-bus: &bus
+  NATS_URL: nats://nats:4222
+  WAF_NATS_URL: nats://nats:4222
+  REDIS_URL: redis://redis:6379
+  REDIS_INTERNAL_URL: redis://redis-internal:6379
+
+# Общее у инспекторов: они не слушают сеть, а подписаны на очередь шины.
+# Ни порта, ни адреса им не нужно -- добавление копии не трогает ни узел, ни
+# конфигурацию (docs/install.md).
+x-inspector: &inspector
+  <<: *resources
+  depends_on:
+    nats:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    redis-internal:
+      condition: service_healthy
+
+services:
+
+  # Узел защиты: nginx с модулем и агент в одном контейнере. Конфигурацию
+  # ведёт контроллер (WAF_NGINX_MANAGE=on) -- до первого поколения нода отвечает
+  # заглушкой 503 на :8079. Порты, серверы и маршруты приезжают из панели.
+  edge:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_NGINX:-https://github.com/exemt/placitum-nginx.git#main}
+      dockerfile: managed/Dockerfile
+      args:
+        NGINX_VERSION: "${NGINX_VERSION:-1.28.0}"
+    hostname: ${PLC_NODE_ID:-edge-01}
+    environment:
+      <<: *bus
+      WAF_NODE_ID: ${PLC_NODE_ID:-edge-01}
+      WAF_AGENT_CONFIG: /etc/waf/agent.conf
+      WAF_NGINX_MANAGE: "on"
+      WAF_AGENT_LOG: info
+      WAF_NGINX_DEBUG: "off"
+    ports:
+      - "${PLC_HTTP_PORT:-80}:8080"
+      - "${PLC_HTTPS_PORT:-443}:8443"
+    volumes:
+      - ../config/edge/agent.conf:/etc/waf/agent.conf:ro
+      - ../config/edge/node.conf:/etc/nginx/waf-node.conf:ro
+      - edge-data:/var/lib/waf/agent
+      - edge-store:/var/lib/waf/store
+    secrets:
+      - waf_node_key
+      - waf_s3_creds
+    # Временный файл тела -- в памяти: модуль дочитывает его синхронно, и на
+    # диске это стоило бы задержки в цикле событий. size обязателен -- страницы
+    # tmpfs идут в память контейнера; uid/gid повторяют каталог из образа.
+    tmpfs:
+      - /var/cache/nginx/client_temp:rw,size=64m,mode=0700,uid=101,gid=101
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-internal:
+        condition: service_healthy
+      minio-mc:
+        condition: service_healthy
+
+  # Панель и API. Он же собирает конфигурацию узлов и рассылает поколения.
+  controller:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_CONTROLLER:-https://github.com/exemt/placitum-controller.git#main}
+      args:
+        # Пин отпечатка ключа контура: панель сверяет им публичный ключ,
+        # который вернёт API. Пусто -- сборка пройдёт, но панель предупредит.
+        VITE_CONTOUR_FINGERPRINT: ${VITE_CONTOUR_FINGERPRINT:-}
+    ports:
+      - "${PLC_PANEL_PORT:-8080}:8080"
+    environment:
+      CONTROLLER_PORT: "8080"
+      CONTROLLER_NAME: controller
+      CONTROLLER_LOG: info
+      CONTROLLER_DATABASE_URL: postgres://${POSTGRES_USER:-waf}:${POSTGRES_PASSWORD:-waf}@postgres:5432/${POSTGRES_DB:-waf}
+      CONTROLLER_NATS_URL: nats://nats:4222
+      CONTROLLER_REDIS_URL: redis://redis:6379
+      CONTROLLER_REDIS_INTERNAL_URL: redis://redis-internal:6379
+      CONTROLLER_SEARCH_URL: http://search:8091
+      CONTROLLER_GEO_URL: http://geo:8092
+      CONTROLLER_CRYPTO_SERVICE_URL: http://crypto:8093
+      # Публичная половина ключа контура; приватную держит crypto и агент.
+      CONTROLLER_CRYPTO_PUBLIC_KEY: /run/secrets/waf_node_pub
+      CONTROLLER_COMPILE_DIR: /app/data/compile
+      CONTROLLER_FLEET_DEMO: "0"
+    secrets:
+      - waf_node_pub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis-internal:
+        condition: service_healthy
+      crypto:
+        condition: service_started
+      search:
+        condition: service_started
+      geo:
+        condition: service_started
+
+  # Поток аудита и журнала процессов в ClickHouse. Схему ClickHouse накатывает
+  # он же при старте: DDL принадлежит владельцу данных (core/migrate/README.md).
+  logger:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_LOGGER:-https://github.com/exemt/placitum-logger.git#main}
+    environment:
+      <<: *bus
+      WAF_LOGGER_LOG: info
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
+      # Словари страны и ASN читает сам ClickHouse из базы контроллера;
+      # логгер только подставляет адрес в текст миграции.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-waf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waf}
+      POSTGRES_DB: ${POSTGRES_DB:-waf}
+    depends_on:
+      nats-box:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  # Поиск по аудиту для панели. Тот же образ, другая команда. Наружу не торчит:
+  # в него ходит контроллер.
+  search:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_LOGGER:-https://github.com/exemt/placitum-logger.git#main}
+    command: ["waf-search"]
+    environment:
+      <<: *bus
+      SEARCH_PORT: "8091"
+      WAF_SEARCH_LOG: info
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
+      # Только архив: горячий обменник до разбора инцидента не доживает.
+      WAF_STORE_S3_ENDPOINT: http://minio:9000
+      WAF_STORE_S3_REGION: us-east-1
+      WAF_STORE_S3_CREDENTIALS_FILE: /run/secrets/waf_s3_creds
+      WAF_STORE_BUCKET_HEADERS: waf-headers
+      WAF_STORE_BUCKET_ARGS: waf-args
+      WAF_STORE_BUCKET_BODY: waf-bodies
+    secrets:
+      - waf_s3_creds
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # Держатель приватного ключа контура рядом с контроллером: расшифровывает
+  # сертификаты из панели. Контроллер открытого текста не видит.
+  crypto:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_CRYPTO:-https://github.com/exemt/placitum-crypto.git#main}
+    environment:
+      <<: *bus
+      WAF_CRYPTO_HTTP: ":8093"
+      WAF_CRYPTO_LOG: info
+      WAF_NODE_KEY: /run/secrets/waf_node_key
+      WAF_CONTROLLER_URL: http://controller:8080
+    secrets:
+      - waf_node_key
+
+  # Страна и ASN по адресу: карточки в панели и правила по гео у инспекторов.
+  # Каталоги пустые до первой загрузки оператором -- без них кодер отвечает
+  # «неизвестно», и это рабочее состояние, а не отказ.
+  geo:
+    <<: *resources
+    mem_limit: 4g
+    build:
+      context: ${PLC_SRC_GEO:-https://github.com/exemt/placitum-geo.git#main}
+    environment:
+      <<: *bus
+      WAF_GEO_LOG: info
+      GOMEMLIMIT: 3GiB
+    volumes:
+      - ${PLC_GEO_DATA:-../config/geo}:/app/data:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # Истина активных наборов: баны, списки, лимиты. Состав -- в памяти и во
+  # внутреннем Redis, хранилище -- база контроллера.
+  keeper:
+    <<: *resources
+    cpus: "4.0"
+    mem_limit: 2g
+    build:
+      context: ${PLC_SRC_KEEPER:-https://github.com/exemt/placitum-keeper.git#main}
+    environment:
+      <<: *bus
+      WAF_KEEPER_LOG: info
+      WAF_KEEPER_DATABASE_URL: postgres://${POSTGRES_USER:-waf}:${POSTGRES_PASSWORD:-waf}@postgres:5432/${POSTGRES_DB:-waf}
+      GOMEMLIMIT: 1536MiB
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis-internal:
+        condition: service_healthy
+
+  # --- Инспекторы. Профили приезжают поколением из панели; в образе лежат
+  # только умолчания. Копий может быть сколько угодно: очередь шины общая.
+
+  inspector-ip:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_IP:-https://github.com/exemt/placitum-ip.git#main}
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *bus
+      WAF_IP_SUBJECT: waf.req.ip
+      WAF_IP_NAME: ip
+      WAF_IP_LOG: info
+      WAF_IP_GEO_ADDR: geo:50051
+
+  inspector-modsec:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_MODSEC:-https://github.com/exemt/placitum-modsec.git#main}
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *bus
+      WAF_MODSEC_SUBJECT: waf.req.modsec
+      WAF_MODSEC_NAME: modsec
+      WAF_MODSEC_LOG: info
+      WAF_MODSEC_GEO_ADDR: geo:50051
+
+  inspector-json:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_JSON:-https://github.com/exemt/placitum-json.git#main}
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *bus
+      WAF_JSON_SUBJECT: waf.req.json
+      WAF_JSON_NAME: json
+      WAF_JSON_LOG: info
+      WAF_JSON_GEO_ADDR: geo:50051
+
+  inspector-counter:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_COUNTER:-https://github.com/exemt/placitum-counter.git#main}
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *bus
+      WAF_COUNTER_SUBJECT: waf.req.counter
+      WAF_COUNTER_NAME: counter
+      WAF_COUNTER_LOG: info
+      WAF_COUNTER_GEO_ADDR: geo:50051
+
+  inspector-action:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_ACTION:-https://github.com/exemt/placitum-action.git#main}
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *bus
+      WAF_ACTION_SUBJECT: waf.req.action
+      WAF_ACTION_NAME: action
+      WAF_ACTION_LOG: info
+      WAF_ACTION_GEO_ADDR: geo:50051
+
+  inspector-rewrite:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_REWRITE:-https://github.com/exemt/placitum-rewrite.git#main}
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *bus
+      WAF_REWRITE_SUBJECT: waf.rsp.rewrite
+      WAF_REWRITE_NAME: rewrite
+      WAF_REWRITE_LOG: info
+
+  # --- Сайдкары наблюдения: пульс хранилищ на странице «Состояние».
+
+  redis-agent:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_REDIS_AGENT:-https://github.com/exemt/placitum-redis-agent.git#main}
+    hostname: redis-agent
+    environment:
+      <<: *bus
+      WAF_REDIS_NAME: redis
+      WAF_REDIS_AGENT_LOG: info
+    volumes:
+      - redis-agent-data:/var/lib/waf/agent
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  redis-internal-agent:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_REDIS_AGENT:-https://github.com/exemt/placitum-redis-agent.git#main}
+    hostname: redis-internal-agent
+    environment:
+      <<: *bus
+      # Наблюдатель смотрит на внутренний экземпляр: один образ, разные адреса.
+      REDIS_URL: redis://redis-internal:6379
+      WAF_REDIS_NAME: redis-internal
+      WAF_REDIS_AGENT_LOG: info
+    volumes:
+      - redis-internal-agent-data:/var/lib/waf/agent
+    depends_on:
+      redis-internal:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  s3-agent:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_S3_AGENT:-https://github.com/exemt/placitum-s3-agent.git#main}
+    hostname: s3-agent
+    environment:
+      <<: *bus
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-waf}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-wafwafwaf}
+      S3_BUCKET: waf-bodies
+      S3_ENSURE_BUCKETS: waf-bodies,waf-headers,waf-args
+      S3_REGION: us-east-1
+      WAF_S3_NAME: s3
+      WAF_S3_AGENT_LOG: info
+    volumes:
+      - s3-agent-data:/var/lib/waf/agent
+    depends_on:
+      minio:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+volumes:
+  edge-data:
+  edge-store:
+  redis-agent-data:
+  redis-internal-agent-data:
+  s3-agent-data:
+
+# Секреты установки: пара ключа контура и реквизиты архива. Заводит их
+# ../install.sh (bootstrap/secrets.sh), в git они не лежат.
+secrets:
+  waf_node_key:
+    file: ../secrets/contour.key
+  waf_node_pub:
+    file: ../secrets/contour.pub
+  waf_s3_creds:
+    file: ../secrets/s3.creds
