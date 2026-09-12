@@ -5,9 +5,10 @@
 #     sh bootstrap/secrets.sh --fingerprint  напечатать отпечаток и выйти
 #     sh bootstrap/secrets.sh --force        перевыпустить ключ контура
 #
-# Идемпотентно: существующие файлы не трогаются. Ключ контура -- RSA-4096,
-# приватный в PKCS#8 PEM, публичный в SPKI PEM; отпечаток -- sha256 по DER
-# публичного ключа, тот же, что панель сверяет в браузере.
+# Идемпотентно: существующие файлы не перевыпускаются, режимы выставляются
+# заново. Ключ контура -- RSA-4096, приватный в PKCS#8 PEM, публичный в SPKI
+# PEM; отпечаток -- sha256 по DER публичного ключа, тот же, что панель сверяет
+# в браузере.
 #
 # ВАЖНО: перевыпуск ключа (--force) обнуляет доверие контура -- сертификаты,
 # зашифрованные прежним ключом, перестанут расшифровываться.
@@ -60,7 +61,6 @@ else
 
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$key" 2>/dev/null
     openssl pkey -in "$key" -pubout -out "$pub" 2>/dev/null
-    chmod 600 "$key"
     printf 'ключ контура выпущен: %s\n' "$key"
 fi
 
@@ -78,7 +78,6 @@ else
 aws_access_key_id=$access
 aws_secret_access_key=$secret
 EOF
-    chmod 600 "$creds"
     printf 'реквизиты архива заведены: %s\n' "$creds"
 fi
 
@@ -98,8 +97,23 @@ for name in auth.hmac auth-app.hmac captcha.hmac cookie.hmac; do
     fi
 
     openssl rand -hex 32 > "$hmac"
-    chmod 600 "$hmac"
     printf 'ключ подписи выпущен: %s\n' "$hmac"
+done
+
+# Права. Compose без swarm монтирует файл секрета в контейнер как есть -- с
+# владельцем и режимом хоста, а процессы в образах работают от своих
+# пользователей (wafcrypto, auth, captcha, ...): файл 0600 владельца установки
+# им не прочесть, и сервис падает на старте с permission denied. Поэтому файлы
+# -- 0644, а закрывает их каталог: 0700, в него не войти никому, кроме
+# владельца установки и демона Docker. Режимы ставятся каждый запуск: так
+# чинятся и секреты, выпущенные прежней версией. Docker Desktop права
+# монтирования не проверяет, и на нём этой разницы не видно.
+chmod 700 "$dir"
+
+for f in "$key" "$pub" "$creds" "$dir"/*.hmac; do
+    if [ -f "$f" ]; then
+        chmod 644 "$f"
+    fi
 done
 
 printf 'отпечаток ключа: %s\n' "$(fingerprint)"
