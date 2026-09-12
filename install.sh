@@ -128,17 +128,20 @@ infra() {
     compose infra.yml up -d --wait
 }
 
+# Схему Postgres накатывает контроллер -- она едет в его образе, и он же
+# делает это при каждом старте. Отдельный шаг здесь нужен ради порядка и
+# отчёта: сначала схема, потом процессы, и видно, что именно применилось.
+# --no-deps: инфраструктура уже поднята предыдущим шагом, а зависимости
+# сервиса controller потянули бы за собой половину контура.
 migrate() {
     say "схема базы"
 
-    if [ -x "$here/bootstrap/migrate.sh" ]; then
-        sh "$here/bootstrap/migrate.sh"
-        return
+    if [ "$build" = yes ]; then
+        compose waf.yml build controller
     fi
 
-    warn "накатчика схемы Postgres ещё нет (core/migrate/README.md)."
-    warn "База поднимется пустой, и контроллер на ней не заработает."
-    warn "Пока: применить controller/schema вручную или дождаться накатчика."
+    compose waf.yml run --rm --no-deps controller node src/migrate.ts --check
+    compose waf.yml run --rm --no-deps controller node src/migrate.ts
 }
 
 components() {
