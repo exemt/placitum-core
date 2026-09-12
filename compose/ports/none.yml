@@ -1,0 +1,4 @@
+# Порты инфраструктуры наружу не публикуются: Postgres, Redis, NATS,
+# ClickHouse и MinIO живут внутри сети compose, снаружи их не видно.
+# Доступ с хоста -- PLC_INFRA_PORTS=loopback в .env (см. loopback.yml).
+services: {}

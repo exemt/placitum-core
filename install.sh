@@ -130,9 +130,15 @@ set_env() {
 
 # --- шаги установки -------------------------------------------------------
 
+# Инфраструктуру поднимает та же модель, что и компоненты (waf.yml включает
+# infra.yml и выбор портов): отдельный запуск infra.yml дал бы контейнеры без
+# портов, и шаг с компонентами пересоздал бы их заново.
+infra_services="nats nats-box postgres clickhouse redis redis-internal minio minio-mc"
+
 infra() {
     say "инфраструктура"
-    compose infra.yml up -d --wait
+    # shellcheck disable=SC2086
+    compose waf.yml up -d --wait $infra_services
 }
 
 # Схему Postgres накатывает контроллер -- она едет в его образе, и он же

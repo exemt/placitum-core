@@ -14,7 +14,11 @@
 name: placitum
 
 include:
-  - path: infra.yml
+  # Инфраструктура и её порты наружу: none (умолчание) или loopback --
+  # PLC_INFRA_PORTS в .env. Файлы сливаются в один проект.
+  - path:
+      - infra.yml
+      - ports/${PLC_INFRA_PORTS:-none}.yml
 
 # Сборка: версия и ревизия установки едут в каждый образ -- метки OCI, строка
 # старта, кадр присутствия. install.sh берёт их из тега и коммита core.

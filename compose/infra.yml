@@ -38,9 +38,6 @@ services:
     <<: *resources
     image: nats:2.12-alpine
     command: ["--config", "/etc/nats/nats-server.conf"]
-    ports:
-      - "4222:4222"   # клиенты
-      - "8222:8222"   # мониторинг: /healthz, /varz, /connz
     volumes:
       - ../config/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
       - nats-data:/data
@@ -96,8 +93,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-waf}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waf}
       POSTGRES_DB: ${POSTGRES_DB:-waf}
-    ports:
-      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # Схему объявляет владелец данных, а не core. Установка подкладывает
@@ -117,9 +112,6 @@ services:
     cpus: "2.0"
     mem_limit: 2g
     image: clickhouse/clickhouse-server:24.8
-    ports:
-      - "8123:8123"   # HTTP
-      - "9000:9000"   # native
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
@@ -157,8 +149,6 @@ services:
     # в waf_store страхует от падения воркера между размещением и удалением.
     # 2g данных + запас cgroup: процесс чуть больше maxmemory.
     command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "noeviction"]
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -185,8 +175,6 @@ services:
     mem_limit: 512m
     image: redis:7.4-alpine
     command: ["redis-server", "--maxmemory", "400mb", "--maxmemory-policy", "noeviction"]
-    ports:
-      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -207,9 +195,6 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wafwafwaf}
       # fastest на сотнях тысяч объектов жрал диск во время combo:
       # PUT архива вставал, nginx клинил даже GET /ip/, k6 не выходил.
-    ports:
-      - "9002:9000"   # S3 API
-      - "9001:9001"   # консоль
     volumes:
       - minio-data:/data
     healthcheck:
