@@ -16,6 +16,12 @@ name: placitum
 include:
   - path: infra.yml
 
+# Сборка: версия и ревизия установки едут в каждый образ -- метки OCI, строка
+# старта, кадр присутствия. install.sh берёт их из тега и коммита core.
+x-build: &build
+  VERSION: ${PLC_VERSION:-dev}
+  REVISION: ${PLC_REVISION:-unknown}
+
 x-resources: &resources
   cpus: "2.0"
   mem_limit: 1g
@@ -54,6 +60,7 @@ services:
       context: ${PLC_SRC_NGINX:?задайте в sources.env}
       dockerfile: managed/Dockerfile
       args:
+        <<: *build
         NGINX_VERSION: "${NGINX_VERSION:-1.28.0}"
     hostname: ${PLC_NODE_ID:-edge-01}
     environment:
@@ -95,6 +102,7 @@ services:
     build:
       context: ${PLC_SRC_CONTROLLER:?задайте в sources.env}
       args:
+        <<: *build
         # Пин отпечатка ключа контура: панель сверяет им публичный ключ,
         # который вернёт API. Пусто -- сборка пройдёт, но панель предупредит.
         VITE_CONTOUR_FINGERPRINT: ${VITE_CONTOUR_FINGERPRINT:-}
@@ -137,6 +145,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_LOGGER:?задайте в sources.env}
+      args: *build
     image: placitum/logger
     environment:
       <<: *bus
@@ -190,6 +199,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_CRYPTO:?задайте в sources.env}
+      args: *build
     environment:
       <<: *bus
       WAF_CRYPTO_HTTP: ":8093"
@@ -207,6 +217,7 @@ services:
     mem_limit: 4g
     build:
       context: ${PLC_SRC_GEO:?задайте в sources.env}
+      args: *build
     environment:
       <<: *bus
       WAF_GEO_LOG: info
@@ -225,6 +236,7 @@ services:
     mem_limit: 2g
     build:
       context: ${PLC_SRC_KEEPER:?задайте в sources.env}
+      args: *build
     environment:
       <<: *bus
       WAF_KEEPER_LOG: info
@@ -246,6 +258,7 @@ services:
     build:
       context: ${PLC_SRC_IP:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     environment:
       <<: *bus
       WAF_IP_SUBJECT: waf.req.ip
@@ -258,6 +271,7 @@ services:
     build:
       context: ${PLC_SRC_MODSEC:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     environment:
       <<: *bus
       WAF_MODSEC_SUBJECT: waf.req.modsec
@@ -270,6 +284,7 @@ services:
     build:
       context: ${PLC_SRC_JSON:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     environment:
       <<: *bus
       WAF_JSON_SUBJECT: waf.req.json
@@ -282,6 +297,7 @@ services:
     build:
       context: ${PLC_SRC_COUNTER:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     environment:
       <<: *bus
       WAF_COUNTER_SUBJECT: waf.req.counter
@@ -294,6 +310,7 @@ services:
     build:
       context: ${PLC_SRC_ACTION:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     environment:
       <<: *bus
       WAF_ACTION_SUBJECT: waf.req.action
@@ -306,6 +323,7 @@ services:
     build:
       context: ${PLC_SRC_REWRITE:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     environment:
       <<: *bus
       WAF_REWRITE_SUBJECT: waf.req.rewrite
@@ -321,6 +339,7 @@ services:
     build:
       context: ${PLC_SRC_AUTH:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     image: placitum/auth
     environment:
       <<: *bus
@@ -374,6 +393,7 @@ services:
     build:
       context: ${PLC_SRC_CAPTCHA:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     image: placitum/captcha
     environment:
       <<: *bus
@@ -422,6 +442,7 @@ services:
     build:
       context: ${PLC_SRC_COOKIE:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     image: placitum/cookie
     environment:
       <<: *bus
@@ -445,6 +466,7 @@ services:
     build:
       context: ${PLC_SRC_VLAI:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
+      args: *build
     image: placitum/vlai
     environment:
       <<: *bus
@@ -467,6 +489,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_REDIS_AGENT:?задайте в sources.env}
+      args: *build
     hostname: redis-agent
     environment:
       <<: *bus
@@ -484,6 +507,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_REDIS_AGENT:?задайте в sources.env}
+      args: *build
     hostname: redis-internal-agent
     environment:
       <<: *bus
@@ -503,6 +527,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_S3_AGENT:-https://github.com/exemt/placitum-agents.git#main:s3}
+      args: *build
     hostname: s3-agent
     environment:
       <<: *bus

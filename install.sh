@@ -20,6 +20,13 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 env_file="$here/.env"
 sources="$here/sources.env"
+
+# Версия и ревизия сборки: едут в образы метками OCI и в бинарь каждого
+# процесса -- их видно в журнале старта и в кадре присутствия. Версия -- тег
+# core, если установка стоит на теге, иначе dev; ревизия -- коммит core.
+PLC_VERSION=${PLC_VERSION:-$(git -C "$here" describe --tags --exact-match 2>/dev/null || echo dev)}
+PLC_REVISION=${PLC_REVISION:-$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)}
+export PLC_VERSION PLC_REVISION
 build=yes
 cmd=${1:-help}
 [ $# -gt 0 ] && shift || true
