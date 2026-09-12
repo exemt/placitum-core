@@ -3,9 +3,10 @@
 #     ../install.sh install          всё по шагам: проверки, секреты, запуск
 #     docker compose -f waf.yml up -d --build --wait
 #
-# Откуда берутся исходники, задаёт sources.env: git-URL с веткой или тегом либо
-# путь на диске. Готовых образов установка не качает -- собирает у себя
-# (docs/delivery.md, «Модель поставки»).
+# Откуда берутся исходники, задаёт только sources.env: git-URL с веткой или
+# тегом либо путь на диске. Встроенных умолчаний у контекстов сборки нет
+# намеренно -- адрес, живущий в двух местах, расходится. Готовых образов
+# установка не качает, собирает у себя (docs/delivery.md, «Модель поставки»).
 #
 # Инфраструктура приходит из infra.yml как есть: переопределять её сервисы
 # нельзя, свои значения она принимает переменными (core/README.md).
@@ -50,7 +51,7 @@ services:
   edge:
     <<: *resources
     build:
-      context: ${PLC_SRC_NGINX:-https://github.com/exemt/placitum-nginx.git#main}
+      context: ${PLC_SRC_NGINX:?задайте в sources.env}
       dockerfile: managed/Dockerfile
       args:
         NGINX_VERSION: "${NGINX_VERSION:-1.28.0}"
@@ -92,7 +93,7 @@ services:
   controller:
     <<: *resources
     build:
-      context: ${PLC_SRC_CONTROLLER:-https://github.com/exemt/placitum-controller.git#main}
+      context: ${PLC_SRC_CONTROLLER:?задайте в sources.env}
       args:
         # Пин отпечатка ключа контура: панель сверяет им публичный ключ,
         # который вернёт API. Пусто -- сборка пройдёт, но панель предупредит.
@@ -135,7 +136,7 @@ services:
   logger:
     <<: *resources
     build:
-      context: ${PLC_SRC_LOGGER:-https://github.com/exemt/placitum-logger.git#main}
+      context: ${PLC_SRC_LOGGER:?задайте в sources.env}
     image: placitum/logger
     environment:
       <<: *bus
@@ -188,7 +189,7 @@ services:
   crypto:
     <<: *resources
     build:
-      context: ${PLC_SRC_CRYPTO:-https://github.com/exemt/placitum-crypto.git#main}
+      context: ${PLC_SRC_CRYPTO:?задайте в sources.env}
     environment:
       <<: *bus
       WAF_CRYPTO_HTTP: ":8093"
@@ -205,7 +206,7 @@ services:
     <<: *resources
     mem_limit: 4g
     build:
-      context: ${PLC_SRC_GEO:-https://github.com/exemt/placitum-geo.git#main}
+      context: ${PLC_SRC_GEO:?задайте в sources.env}
     environment:
       <<: *bus
       WAF_GEO_LOG: info
@@ -223,7 +224,7 @@ services:
     cpus: "4.0"
     mem_limit: 2g
     build:
-      context: ${PLC_SRC_KEEPER:-https://github.com/exemt/placitum-keeper.git#main}
+      context: ${PLC_SRC_KEEPER:?задайте в sources.env}
     environment:
       <<: *bus
       WAF_KEEPER_LOG: info
@@ -243,7 +244,7 @@ services:
   inspector-ip:
     <<: *inspector
     build:
-      context: ${PLC_SRC_IP:-https://github.com/exemt/placitum-ip.git#main}
+      context: ${PLC_SRC_IP:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
     environment:
       <<: *bus
@@ -255,7 +256,7 @@ services:
   inspector-modsec:
     <<: *inspector
     build:
-      context: ${PLC_SRC_MODSEC:-https://github.com/exemt/placitum-modsec.git#main}
+      context: ${PLC_SRC_MODSEC:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
     environment:
       <<: *bus
@@ -267,7 +268,7 @@ services:
   inspector-json:
     <<: *inspector
     build:
-      context: ${PLC_SRC_JSON:-https://github.com/exemt/placitum-json.git#main}
+      context: ${PLC_SRC_JSON:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
     environment:
       <<: *bus
@@ -279,7 +280,7 @@ services:
   inspector-counter:
     <<: *inspector
     build:
-      context: ${PLC_SRC_COUNTER:-https://github.com/exemt/placitum-counter.git#main}
+      context: ${PLC_SRC_COUNTER:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
     environment:
       <<: *bus
@@ -291,7 +292,7 @@ services:
   inspector-action:
     <<: *inspector
     build:
-      context: ${PLC_SRC_ACTION:-https://github.com/exemt/placitum-action.git#main}
+      context: ${PLC_SRC_ACTION:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
     environment:
       <<: *bus
@@ -303,20 +304,169 @@ services:
   inspector-rewrite:
     <<: *inspector
     build:
-      context: ${PLC_SRC_REWRITE:-https://github.com/exemt/placitum-rewrite.git#main}
+      context: ${PLC_SRC_REWRITE:?задайте в sources.env}
       dockerfile: deploy/Dockerfile
     environment:
       <<: *bus
-      WAF_REWRITE_SUBJECT: waf.rsp.rewrite
+      WAF_REWRITE_SUBJECT: waf.req.rewrite
       WAF_REWRITE_NAME: rewrite
       WAF_REWRITE_LOG: info
+
+
+  # --- Калитка: инспектор второго фактора и форма входа. Один образ, две
+  # команды. Ключ сессий общий у обоих и больше ни у кого.
+
+  inspector-auth:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_AUTH:?задайте в sources.env}
+      dockerfile: deploy/Dockerfile
+    image: placitum/auth
+    environment:
+      <<: *bus
+      WAF_AUTH_SUBJECT: waf.req.auth
+      WAF_AUTH_NAME: auth
+      WAF_AUTH_LOG: info
+      WAF_AUTH_KEY_FILE: /run/secrets/waf_auth_hmac
+      WAF_AUTH_HTTP_URL: http://auth-http:8080
+      WAF_AUTH_GEO_ADDR: geo:50051
+    secrets:
+      - waf_auth_hmac
+
+  # Форма входа для браузера клиента: узел ходит в неё обычным proxy_pass.
+  # Наружу не выставляется. Источники входа и профили присылает контроллер.
+  auth-http:
+    <<: *resources
+    image: placitum/auth
+    command: ["auth-http"]
+    environment:
+      <<: *bus
+      WAF_AUTH_NAME: auth
+      WAF_AUTH_LOG: info
+      WAF_AUTH_LISTEN: ":8080"
+      WAF_AUTH_KEY_FILE: /run/secrets/waf_auth_hmac
+      WAF_AUTH_APP_KEY_FILE: /run/secrets/waf_auth_app
+      # off, пока узел отвечает по чистому HTTP: иначе браузер куку не отправит.
+      WAF_AUTH_COOKIE_SECURE: ${PLC_COOKIE_SECURE:-off}
+      WAF_AUTH_CONTROLLER: http://controller:8080
+      WAF_AUTH_SCOPE: name:default
+      WAF_AUTH_CONTOUR_KEY: /run/secrets/waf_node_key
+    secrets:
+      - waf_auth_hmac
+      - waf_auth_app
+      - waf_node_key
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      redis-internal:
+        condition: service_healthy
+      controller:
+        condition: service_started
+
+  # --- Капча: инспектор и виджет. Свой ключ, с калиткой не делится.
+
+  inspector-captcha:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_CAPTCHA:?задайте в sources.env}
+      dockerfile: deploy/Dockerfile
+    image: placitum/captcha
+    environment:
+      <<: *bus
+      WAF_CAPTCHA_SUBJECT: waf.req.captcha
+      WAF_CAPTCHA_NAME: captcha
+      WAF_CAPTCHA_LOG: info
+      WAF_CAPTCHA_KEY_FILE: /run/secrets/waf_captcha_hmac
+      WAF_CAPTCHA_HTTP_URL: http://captcha-http:8080
+      WAF_CAPTCHA_GEO_ADDR: geo:50051
+    secrets:
+      - waf_captcha_hmac
+
+  captcha-http:
+    <<: *resources
+    image: placitum/captcha
+    command: ["captcha-http"]
+    environment:
+      <<: *bus
+      WAF_CAPTCHA_NAME: captcha
+      WAF_CAPTCHA_LOG: info
+      WAF_CAPTCHA_LISTEN: ":8080"
+      WAF_CAPTCHA_KEY_FILE: /run/secrets/waf_captcha_hmac
+      WAF_CAPTCHA_COOKIE_SECURE: ${PLC_COOKIE_SECURE:-off}
+      WAF_CAPTCHA_CONTROLLER: http://controller:8080
+      WAF_CAPTCHA_SCOPE: name:default
+      WAF_CAPTCHA_CONTOUR_KEY: /run/secrets/waf_node_key
+    secrets:
+      - waf_captcha_hmac
+      - waf_node_key
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/waf/captcha/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      redis-internal:
+        condition: service_healthy
+      controller:
+        condition: service_started
+
+  # --- Подпись кук: по куке инспектора решают соседи, поэтому ключ свой.
+
+  inspector-cookie:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_COOKIE:?задайте в sources.env}
+      dockerfile: deploy/Dockerfile
+    image: placitum/cookie
+    environment:
+      <<: *bus
+      WAF_COOKIE_SUBJECT: waf.req.cookie
+      WAF_COOKIE_NAME: cookie
+      WAF_COOKIE_LOG: info
+      WAF_COOKIE_SECRET_FILE: /run/secrets/waf_cookie_hmac
+      WAF_COOKIE_GEO_ADDR: geo:50051
+    secrets:
+      - waf_cookie_hmac
+
+  # --- Классификатор текста. За профилем: тяжёлый, веса модели качает при
+  # первом старте в том; поднимайте, когда правило по оценке текста нужно.
+  #
+  #     docker compose --profile vlai up -d
+  inspector-vlai:
+    profiles: ["vlai"]
+    cpus: "2.0"
+    mem_limit: 4g
+    restart: unless-stopped
+    build:
+      context: ${PLC_SRC_VLAI:?задайте в sources.env}
+      dockerfile: deploy/Dockerfile
+    image: placitum/vlai
+    environment:
+      <<: *bus
+      WAF_VLAI_SUBJECT: waf.req.vlai
+      WAF_VLAI_NAME: vlai
+      WAF_VLAI_LOG: info
+      VLAI_DEVICE: cpu
+      WAF_VLAI_GEO_URL: http://geo:8092
+    volumes:
+      - vlai-checkpoint:/var/lib/waf/vlai
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # --- Сайдкары наблюдения: пульс хранилищ на странице «Состояние».
 
   redis-agent:
     <<: *resources
     build:
-      context: ${PLC_SRC_REDIS_AGENT:-https://github.com/exemt/placitum-redis-agent.git#main}
+      context: ${PLC_SRC_REDIS_AGENT:?задайте в sources.env}
     hostname: redis-agent
     environment:
       <<: *bus
@@ -333,7 +483,7 @@ services:
   redis-internal-agent:
     <<: *resources
     build:
-      context: ${PLC_SRC_REDIS_AGENT:-https://github.com/exemt/placitum-redis-agent.git#main}
+      context: ${PLC_SRC_REDIS_AGENT:?задайте в sources.env}
     hostname: redis-internal-agent
     environment:
       <<: *bus
@@ -352,7 +502,7 @@ services:
   s3-agent:
     <<: *resources
     build:
-      context: ${PLC_SRC_S3_AGENT:-https://github.com/exemt/placitum-s3-agent.git#main}
+      context: ${PLC_SRC_S3_AGENT:-https://github.com/exemt/placitum-agents.git#main:s3}
     hostname: s3-agent
     environment:
       <<: *bus
@@ -375,12 +525,13 @@ services:
 volumes:
   edge-data:
   edge-store:
+  vlai-checkpoint:
   redis-agent-data:
   redis-internal-agent-data:
   s3-agent-data:
 
-# Секреты установки: пара ключа контура и реквизиты архива. Заводит их
-# ../install.sh (bootstrap/secrets.sh), в git они не лежат.
+# Секреты установки: пара ключа контура, реквизиты архива и ключи подписи.
+# Заводит их ../install.sh (bootstrap/secrets.sh), в git они не лежат.
 secrets:
   waf_node_key:
     file: ../secrets/contour.key
@@ -388,3 +539,12 @@ secrets:
     file: ../secrets/contour.pub
   waf_s3_creds:
     file: ../secrets/s3.creds
+  # Ключи подписи: по одному на подсистему, друг с другом не делятся.
+  waf_auth_hmac:
+    file: ../secrets/auth.hmac
+  waf_auth_app:
+    file: ../secrets/auth-app.hmac
+  waf_captcha_hmac:
+    file: ../secrets/captcha.hmac
+  waf_cookie_hmac:
+    file: ../secrets/cookie.hmac

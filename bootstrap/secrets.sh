@@ -82,4 +82,24 @@ EOF
     printf 'реквизиты архива заведены: %s\n' "$creds"
 fi
 
+# Ключи подписи: по одному на подсистему, друг с другом не делятся.
+#   auth.hmac      сессии калитки -- общий у инспектора auth и auth-http
+#   auth-app.hmac  удостоверение приложения: его знает и приложение, и калитка
+#   captcha.hmac   капча -- общий у инспектора captcha и captcha-http
+#   cookie.hmac    подпись значений кук инспектора cookie
+# Перевыпуск любого из них разлогинивает всех, кого он подписывал, и ничего
+# другого не ломает.
+for name in auth.hmac auth-app.hmac captcha.hmac cookie.hmac; do
+    hmac="$dir/$name"
+
+    if [ -f "$hmac" ]; then
+        printf 'ключ подписи на месте: %s\n' "$hmac"
+        continue
+    fi
+
+    openssl rand -hex 32 > "$hmac"
+    chmod 600 "$hmac"
+    printf 'ключ подписи выпущен: %s\n' "$hmac"
+done
+
 printf 'отпечаток ключа: %s\n' "$(fingerprint)"

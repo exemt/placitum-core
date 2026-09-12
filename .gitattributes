@@ -1,0 +1,5 @@
+# Копия корневого правила монорепозитория: в репозитории core (docs/delivery.md)
+# этот каталог становится корнем, и корневого .gitattributes рядом нет. Без него
+# клон на Windows получает CRLF, а install.sh с CRLF на Linux не запускается
+# вовсе -- /bin/sh отвечает «bad interpreter».
+* text=auto eol=lf
