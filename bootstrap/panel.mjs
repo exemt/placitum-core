@@ -521,6 +521,11 @@ async function locations(srv, wanted) {
  * Заголовки -- стандартный набор: адрес клиента форма берёт из последнего
  * значения X-Forwarded-For, а его дописывает этот узел. Модуль на форме выключен:
  * пароль из формы не попадает ни в журнал, ни в архив.
+ *
+ * Статика панели -- тоже мимо калитки: бандл и значок данных не несут и нужны
+ * странице и до входа, а за калиткой каждый такой запрос без сессии был бы
+ * отказом в аудите. favicon.ico у панели нет: путь отвечает 204, а не страницей
+ * панели вместо значка.
  */
 await locations(panel, [
   {
@@ -529,6 +534,30 @@ await locations(panel, [
     position: 10,
     upstream_id: formPool.uuid,
     nginx: { proxyHeaders: "standard" },
+    waf: { enabled: false },
+  },
+  {
+    match: "prefix",
+    path: "/assets/",
+    position: 11,
+    upstream_id: controllerPool.uuid,
+    nginx: { proxyHeaders: "standard" },
+    waf: { enabled: false },
+  },
+  {
+    match: "exact",
+    path: "/favicon.svg",
+    position: 12,
+    upstream_id: controllerPool.uuid,
+    nginx: { proxyHeaders: "standard" },
+    waf: { enabled: false },
+  },
+  {
+    match: "exact",
+    path: "/favicon.ico",
+    position: 13,
+    handler: "return",
+    return_status: 204,
     waf: { enabled: false },
   },
 ]);
