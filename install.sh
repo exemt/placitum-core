@@ -1,12 +1,13 @@
 #!/bin/sh
 # Установка Placitum: окружение, секреты, инфраструктура, компоненты, панель.
 #
-#     ./install.sh check       только проверки: чем и куда ставим
-#     ./install.sh install     всё по порядку
-#     ./install.sh infra       поднять одну инфраструктуру
-#     ./install.sh panel       завести панель за калиткой на поднятом контуре
-#     ./install.sh status      что поднято и как себя чувствует
-#     ./install.sh down        остановить (тома и данные не трогает)
+#     ./install.sh check            только проверки: чем и куда ставим
+#     ./install.sh install          всё по порядку
+#     ./install.sh infra            поднять одну инфраструктуру
+#     ./install.sh panel            завести панель за калиткой на поднятом контуре
+#     ./install.sh panel-password   сменить пароль admin панели и снять блокировку
+#     ./install.sh status           что поднято и как себя чувствует
+#     ./install.sh down             остановить (тома и данные не трогает)
 #
 # Ключи:
 #     --sources <файл>   откуда брать исходники компонентов; умолчание sources.env
@@ -159,6 +160,59 @@ check_panel() {
     esac
 }
 
+# --- пароль admin панели --------------------------------------------------
+
+# Пароль нигде не хранится: живёт в памяти этого процесса, до базы
+# контроллера доезжает bcrypt. Спрашивается до сборки, чтобы установка не
+# ждала ввода после долгой сборки. Без терминала -- PLC_PANEL_PASSWORD из
+# окружения; пусто и там -- пароль сгенерирует шаг панели и покажет один раз.
+panel_pass=""
+
+read_secret() {
+    printf '%s' "$1" >&2
+    stty -echo 2>/dev/null || true
+    IFS= read -r secret || secret=""
+    stty echo 2>/dev/null || true
+    printf '\n' >&2
+    printf '%s' "$secret"
+}
+
+# ask_panel_password <подсказка к пустому вводу>
+ask_panel_password() {
+    if [ -n "${PLC_PANEL_PASSWORD:-}" ]; then
+        [ "${#PLC_PANEL_PASSWORD}" -ge 8 ] || die "PLC_PANEL_PASSWORD: не короче 8 символов"
+        panel_pass=$PLC_PANEL_PASSWORD
+        printf 'пароль admin панели: из PLC_PANEL_PASSWORD\n'
+        return 0
+    fi
+
+    [ -t 0 ] || return 0
+
+    # Прерванный ввод не должен оставить терминал без эха.
+    trap 'stty echo 2>/dev/null' EXIT INT TERM
+
+    while :; do
+        first=$(read_secret "пароль admin панели ($1): ")
+        [ -n "$first" ] || break
+
+        if [ "${#first}" -lt 8 ]; then
+            warn "не короче 8 символов"
+            continue
+        fi
+
+        second=$(read_secret "ещё раз: ")
+
+        if [ "$first" = "$second" ]; then
+            panel_pass=$first
+            break
+        fi
+
+        warn "не совпало, ещё раз"
+    done
+
+    trap - EXIT INT TERM
+}
+
 # --- окружение и секреты --------------------------------------------------
 
 prepare_env() {
@@ -245,41 +299,51 @@ components() {
 }
 
 # Панель за калиткой: на узле сервер panel, на нём калитка auth со списком
-# panel_users, в списке admin. Объекты заводит bootstrap/panel.mjs через API
-# изнутри контейнера контроллера: у машины установки нет обещанных curl и
-# python, а у контроллера есть node и сам API. Пароль admin выпускается здесь,
-# как прочие секреты: в список едет только bcrypt, открытый -- в secrets/.
+# panel_users, в списке admin. Объекты и пароль заводит bootstrap/panel.mjs
+# через API изнутри контейнера контроллера: у машины установки нет обещанных
+# curl и python, а у контроллера есть node, bcrypt и сам API.
+#
+# panel [ensure|reset]: ensure заводит admin только в пустой список и меняет
+# пароль, лишь если его ввели; reset меняет всегда, при пустом -- генерирует.
 panel() {
     say "панель"
 
-    pass_file="$here/secrets/panel-admin.password"
-    fresh=no
-
-    if [ ! -s "$pass_file" ]; then
-        (umask 077 && openssl rand -base64 48 | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-20 > "$pass_file")
-        fresh=yes
-    fi
-
-    # stdout скрипта -- одно слово: created или kept, ход работы -- в stderr.
-    # Упал -- файл пароля не трогаем: admin мог успеть завестись именно с ним.
-    admin=$(compose waf.yml exec -T controller node --input-type=module \
-        -e "$(cat "$here/bootstrap/panel.mjs")" < "$pass_file") ||
+    # stdin -- пароль (может быть пустым); stdout -- одна строка: created,
+    # updated, kept или generated <пароль>. Ход работы -- в stderr.
+    result=$(printf '%s' "$panel_pass" |
+        compose waf.yml exec -T -e "PANEL_ADMIN=${1:-ensure}" controller \
+            node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")") ||
         die "панель за калиткой не встала; контроллер напрямую -- http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
 
-    case "$admin" in
+    case "$result" in
         created)
-            printf '\nвход в панель: admin / %s\n' "$(cat "$pass_file")"
-            printf 'пароль сохранён в %s\n' "$pass_file"
+            printf 'admin заведён с введённым паролем\n'
+            ;;
+        updated)
+            printf 'пароль admin сменён\n'
             ;;
         kept)
-            # Пароль, выпущенный сейчас, никому не достался: список уже был.
-            [ "$fresh" = yes ] && rm -f "$pass_file"
-            printf 'пользователи панели уже заведены: пароль не трогаю\n'
+            printf 'admin уже есть, пароль прежний (сменить -- ./install.sh panel-password)\n'
+            ;;
+        "generated "*)
+            printf '\nвход в панель: admin / %s\n' "${result#generated }"
+            printf 'пароль нигде не сохранён: запишите его или смените -- ./install.sh panel-password\n'
             ;;
         *)
-            die "bootstrap/panel.mjs ответил неожиданно: $admin"
+            die "bootstrap/panel.mjs ответил неожиданно: $result"
             ;;
     esac
+}
+
+# Смена пароля -- она же аварийный вход: снимаются и блокировки калитки
+# панели по логину и по адресу, иначе забывший пароль ждал бы ещё 15 минут.
+panel_password() {
+    ask_panel_password "Enter -- сгенерировать"
+    panel reset
+
+    compose waf.yml exec -T redis-internal sh -c \
+        "redis-cli --scan --pattern 'auth:*:panel/*' | xargs -r redis-cli del >/dev/null" &&
+        printf 'блокировки входа в панель сняты\n'
 }
 
 status() {
@@ -291,11 +355,8 @@ status() {
     bind=${PLC_PANEL_BIND:-127.0.0.1}
     [ "$bind" = 0.0.0.0 ] && bind='<адрес машины>'
 
-    login="вход admin"
-    [ -f "$here/secrets/panel-admin.password" ] &&
-        login="$login, пароль установки -- secrets/panel-admin.password"
-
-    printf '\nпанель:  http://%s:%s -- %s\n' "$bind" "${PLC_PANEL_PORT:-8081}" "$login"
+    printf '\nпанель:  http://%s:%s -- вход admin, сменить пароль -- ./install.sh panel-password\n' \
+        "$bind" "${PLC_PANEL_PORT:-8081}"
     printf 'API:     http://127.0.0.1:%s -- без калитки, только с этой машины (снаружи -- ssh -L)\n' \
         "${PLC_CONTROLLER_PORT:-8080}"
     printf 'трафик:  http://localhost:%s\n' "${PLC_HTTP_PORT:-80}"
@@ -310,6 +371,7 @@ case "$cmd" in
         preflight
         prepare_env
         check_panel
+        ask_panel_password "Enter -- оставить прежний или сгенерировать при первой установке"
         infra
         migrate
         components
@@ -321,11 +383,16 @@ case "$cmd" in
         prepare_env
         infra
         ;;
-    panel)
+    panel|panel-password)
         [ -f "$env_file" ] || die "нет $env_file: панель заводится на поставленном контуре (./install.sh install)"
         # shellcheck disable=SC1090
         . "$env_file"
-        panel
+
+        if [ "$cmd" = panel ]; then
+            panel
+        else
+            panel_password
+        fi
         ;;
     status)
         status
@@ -335,7 +402,7 @@ case "$cmd" in
         compose waf.yml down
         ;;
     help|-h|--help)
-        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         die "неизвестная команда: $cmd (см. ./install.sh help)"

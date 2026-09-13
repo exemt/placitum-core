@@ -5,29 +5,73 @@
  * нём калитка auth со списком panel_users. Сам контроллер опубликован только на
  * loopback хоста -- для install.sh, e2e и аварийного входа.
  *
- * Скрипт идёт внутри контейнера контроллера: там есть node и API на 127.0.0.1,
- * а машине установки не обещаны ни curl, ни python.
+ * Скрипт идёт внутри контейнера контроллера: там есть node, bcrypt и API на
+ * 127.0.0.1, а машине установки не обещаны ни curl, ни python.
  *
- *     docker compose exec -T controller node --input-type=module \
- *         -e "$(cat bootstrap/panel.mjs)" < secrets/panel-admin.password
+ *     printf '%s' "$пароль" | docker compose exec -T -e PANEL_ADMIN=ensure controller \
+ *         node --input-type=module -e "$(cat bootstrap/panel.mjs)"
  *
- * stdin -- пароль admin: нужен, только если список пользователей пуст.
- * stdout -- одно слово для install.sh: created (admin заведён этим паролем) или
- * kept (пользователи уже были). Ход работы -- в stderr.
+ * stdin -- пароль admin, может быть пустым. Нигде не хранится: в список уезжает
+ * bcrypt, как у формы пользователя в панели.
  *
- * Заводится то, чего нет; то, что есть, не трогается: повторный запуск ничего
- * не плодит и правок оператора не затирает. Рассылка -- только если что-то
- * заведено: она публикует заодно и черновики оператора в тех же каналах.
+ * PANEL_ADMIN=ensure (установка): admin заводится в пустой список -- с
+ * введённым паролем или сгенерированным; есть -- пароль меняется, только если
+ * ввели другой. PANEL_ADMIN=reset (install.sh panel-password): пароль admin
+ * меняется всегда, пустой -- генерируется.
+ *
+ * stdout -- одна строка для install.sh: created, updated, kept или
+ * generated <пароль>. Ход работы -- в stderr.
+ *
+ * Заводится то, чего нет; то, что есть, не трогается, кроме того, без чего
+ * панель не панель: пароля admin по просьбе, метки panel в профиле калитки и
+ * журнала на путях, где его не задавали. Рассылка -- только если что-то
+ * поменялось: она публикует заодно и черновики оператора в тех же каналах.
  */
+
+import { randomBytes } from "node:crypto";
+
+import bcrypt from "bcryptjs";
 
 const API = `http://127.0.0.1:${process.env.CONTROLLER_PORT ?? "8080"}`;
 const EDGE = "http://edge:8081";
+const MODE = process.env.PANEL_ADMIN ?? "ensure";
 
 const PANEL_PORT = 8081;
 const BACKEND_PORT = 18081;
 const LOGIN = "/waf/panel-login";
 const USERS = "panel_users";
 const GATE = "auth-panel";
+const ADMIN = "admin";
+
+/*
+ * Метка всех запросов к панели в аудите. Рядом с пользователем сессии она
+ * отвечает на «кто что делал в панели» одним фильтром marker=panel. Ставит её
+ * калитка на каждом своём событии: вошёл, аноним, битая сессия, чужая зона.
+ */
+const MARKER = "panel";
+const MARKED = ["authenticated", "anonymous", "invalid", "forbidden"];
+
+/*
+ * Журнал панели. В запись аудита -- срез заголовков и аргументов: 8k на объект,
+ * 1k на пару. В архив на сутки -- запрос целиком. Тела в capture калитки нет, и
+ * в архив оно едет reload -- оригиналом, инспектор его не видит.
+ *
+ * Кука сессии и Authorization -- хешем, а не значением: живой токен в журнале --
+ * ключ к чужой сессии, а хеш по-прежнему связывает запросы одной сессии. Пароль в
+ * теле директивой не замаскировать, поэтому тело пути, куда пароль уходит
+ * открытым текстом, в журнал не пишется вовсе (user-line ниже).
+ */
+const MASKS = ["request headers mask=cookie,authorization", "request args mask=password"];
+const PREVIEW = ["request headers=8k/1k args=8k/1k", ...MASKS];
+const JOURNAL = { preview: PREVIEW, archive: ["request headers args ttl=1d", ...MASKS] };
+const JOURNAL_BODY = {
+  preview: PREVIEW,
+  archive: ["request headers args body ttl=1d", "request reload body", ...MASKS],
+};
+
+// Потолок тела на обычных путях панели: PEM и конверты сертификатов влезают
+// (store -- до 2 МБ ciphertext, в JSON это около 2,8 МБ). Выгрузке гео -- свой путь.
+const BODY = "4m";
 
 /* Ошибка, которую ожидание не повторяет: ждать тут нечего. */
 class Fatal extends Error {}
@@ -120,13 +164,19 @@ function passTo(target, extra = []) {
   ].join("\n");
 }
 
+if (MODE !== "ensure" && MODE !== "reset") {
+  throw new Error(`PANEL_ADMIN: ждал ensure или reset, пришло ${JSON.stringify(MODE)}`);
+}
+
 let password = "";
 
 for await (const chunk of process.stdin) {
   password += chunk;
 }
 
-password = password.trim();
+// Пароль как есть: пробелы по краям -- тоже пароль. Срезается только перевод
+// строки, если его дописал тот, кто подавал stdin.
+password = password.replace(/\r?\n$/, "");
 
 const { spaces } = await api("GET", "/api/spaces");
 const space = spaces.find((row) => row.name === "default");
@@ -170,43 +220,86 @@ const users = await ensure(
   },
 );
 
-/*
- * admin заводится только в пустой список. Список, где уже кто-то есть, --
- * решение оператора, даже если admin в нём нет: вернуть его молча значило бы
- * воскресить учётку, которую удалили.
- */
-let admin = "kept";
-
 const entries = rows(
   await api("GET", `${base}/datasets/${users.uuid}/addresses`),
   "addresses",
 );
 
-if (entries.length === 0) {
-  if (password === "") {
-    throw new Error(`список ${USERS} пуст, а пароля admin на stdin нет`);
-  }
+// Строка пользователя: login:bcrypt[:группы[:store-uuid секрета TOTP]].
+const current = entries.find((row) => row.address.split(":")[0].toLowerCase() === ADMIN);
+
+/*
+ * Хеш считает контроллер (/auth/user-line) -- та же цена и тот же формат, что у
+ * формы пользователя в панели. Группы и ссылка на секрет TOTP прежней строки
+ * переезжают в новую: смена пароля не должна снимать второй фактор.
+ */
+async function userLine(secret, previous) {
+  const [, , groups = "", totp = ""] = (previous ?? "").split(":");
 
   const { line } = await api("POST", `${base}/auth/user-line`, {
-    login: "admin",
-    password,
-    groups: [],
+    login: ADMIN,
+    password: secret,
+    groups: groups.split(",").filter((item) => item !== ""),
   });
 
-  await api("POST", `${base}/datasets/${users.uuid}/addresses`, { address: line });
-  changed = true;
-  admin = "created";
-  say("заведено: пользователь admin");
+  const [login, hash] = line.split(":");
+  const tail = totp !== "" ? `:${groups}:${totp}` : groups !== "" ? `:${groups}` : "";
+
+  return `${login}:${hash}${tail}`;
+}
+
+const generate = () => randomBytes(15).toString("base64url");
+
+let admin = "kept";
+let secret = password;
+
+if (current === undefined) {
+  if (MODE === "ensure" && entries.length > 0) {
+    /*
+     * Список, где уже кто-то есть, -- решение оператора, даже если admin в нём
+     * нет: вернуть его молча значило бы воскресить учётку, которую удалили.
+     */
+    say(`admin в ${USERS} нет, но список не пуст: решение оператора, не трогаю`);
+  } else {
+    admin = secret === "" ? "generated" : "created";
+    secret = secret === "" ? generate() : secret;
+
+    await api("POST", `${base}/datasets/${users.uuid}/addresses`, {
+      address: await userLine(secret, null),
+    });
+    changed = true;
+    say("заведено: пользователь admin");
+  }
 } else {
-  say(`уже есть: пользователи в ${USERS} (${entries.length})`);
+  const [, hash = ""] = current.address.split(":");
+  const same = password !== "" && (await bcrypt.compare(password, hash));
+
+  if (MODE === "reset" || (password !== "" && !same)) {
+    admin = secret === "" ? "generated" : "updated";
+    secret = secret === "" ? generate() : secret;
+
+    // Сначала новая строка, потом удаление старой: сорвавшаяся смена не должна
+    // оставить список без admin.
+    await api("POST", `${base}/datasets/${users.uuid}/addresses`, {
+      address: await userLine(secret, current.address),
+    });
+    await api("DELETE", `${base}/addresses/${current.uuid}`);
+    changed = true;
+    say("сменён: пароль admin");
+  } else {
+    say(password === "" ? "уже есть: admin, пароль прежний" : "уже есть: admin с этим паролем");
+  }
 }
 
 /* --- апстрим, порты, серверы -------------------------------------------- */
 
+// Апстрим узнаётся по адресу внутреннего сервера: имя правят в панели.
 const backend = await ensure(
   `апстрим panel-backend -> 127.0.0.1:${BACKEND_PORT}`,
   rows(await api("GET", `${base}/upstreams`), "upstreams"),
-  (row) => row.name === "panel-backend",
+  (row) =>
+    (row.peers ?? []).some((peer) => peer.host === "127.0.0.1" && peer.port === BACKEND_PORT) ||
+    row.name === "panel-backend",
   `${base}/upstreams`,
   {
     name: "panel-backend",
@@ -232,29 +325,45 @@ const backendPort = await port("panel-backend", "127.0.0.1", BACKEND_PORT);
 
 const servers = rows(await api("GET", `${base}/servers`), "servers");
 
+// Кто какой порт слушает: сервер панели узнаётся по своему порту, а не по
+// имени -- имя правят в панели, а порт у каждого сервера панели свой.
+const bound = new Map();
+
+for (const row of servers) {
+  for (const item of rows(await api("GET", `${base}/servers/${row.uuid}/ports`), "listens")) {
+    if (!bound.has(item.port_id)) {
+      bound.set(item.port_id, row);
+    }
+  }
+}
+
 /*
  * Порт у каждого сервера свой, и сервер на нём -- default_server: имя, которым
- * пришли (адрес машины, её имя в сети), панели безразлично.
+ * пришли (адрес машины, её имя в сети), панели безразлично. server_name -- имя
+ * сервера, а не `_`: карточка в панели берёт имя из него.
  */
 async function server(name, listen, extra = {}) {
+  const held = bound.get(listen.uuid);
+
+  if (held !== undefined) {
+    say(`уже есть: сервер ${name} (слушает ${listen.address}:${listen.port}, в панели «${held.name}»)`);
+    return held;
+  }
+
   const row = await ensure(
     `сервер ${name}`,
     servers,
     (item) => item.name === name,
     `${base}/servers`,
-    { name, server_names: ["_"], enabled: true, ...extra },
+    { name, server_names: [name], enabled: true, ...extra },
   );
 
-  const listens = rows(await api("GET", `${base}/servers/${row.uuid}/ports`), "listens");
-
-  if (!listens.some((item) => item.port_id === listen.uuid)) {
-    await api("POST", `${base}/servers/${row.uuid}/ports`, {
-      port_id: listen.uuid,
-      default_server: true,
-    });
-    changed = true;
-    say(`заведено: ${name} слушает ${listen.address}:${listen.port}`);
-  }
+  await api("POST", `${base}/servers/${row.uuid}/ports`, {
+    port_id: listen.uuid,
+    default_server: true,
+  });
+  changed = true;
+  say(`заведено: ${name} слушает ${listen.address}:${listen.port}`);
 
   return row;
 }
@@ -280,11 +389,18 @@ function untouchedRoot(row) {
   );
 }
 
+/*
+ * Путь, у которого журнала нет вовсе, получает журнал панели: заведён он до
+ * журнала, а не оператором без журнала -- оператор, снявший журнал, оставляет
+ * `none`, а не пустоту.
+ */
+const unjournaled = (row) => row.waf?.archive === undefined && row.waf?.preview === undefined;
+
 async function locations(srv, wanted) {
   const have = rows(await api("GET", `${base}/servers/${srv.uuid}/locations`), "locations");
 
-  for (const loc of wanted) {
-    const what = `путь ${srv.name} ${loc.match === "exact" ? "= " : ""}${loc.path}`;
+  for (const { upgrade, ...loc } of wanted) {
+    const what = `путь ${srv.name} ${loc.match === "exact" ? "= " : loc.match === "regex" ? "~ " : ""}${loc.path}`;
     const body = {
       enabled: true,
       handler: "proxy",
@@ -310,6 +426,19 @@ async function locations(srv, wanted) {
       });
       changed = true;
       say(`настроено: ${what} (корень сервера)`);
+      continue;
+    }
+
+    const patch = found !== undefined && upgrade !== undefined ? upgrade(found) : null;
+
+    if (patch !== null) {
+      await api("PUT", `${base}/locations/${found.uuid}`, {
+        ...patch,
+        uuid: found.uuid,
+        server_id: srv.uuid,
+      });
+      changed = true;
+      say(`обновлено: ${what} (${Object.keys(patch).join(", ")})`);
       continue;
     }
 
@@ -356,7 +485,8 @@ await locations(inner, [
 /*
  * Форма входа -- до источника: источник сверяет свой адрес с путями сервера.
  * Заголовки -- стандартный набор: адрес клиента форма берёт из последнего
- * значения X-Forwarded-For, а его дописывает этот узел.
+ * значения X-Forwarded-For, а его дописывает этот узел. Модуль на форме выключен:
+ * пароль из формы не попадает ни в журнал, ни в архив.
  */
 await locations(panel, [
   {
@@ -396,7 +526,9 @@ await ensure(
   },
 );
 
-await ensure(
+const marks = MARKED.map((on) => ({ on, do: "mark", marker: MARKER }));
+
+const profile = await ensure(
   "профиль калитки panel",
   rows(await api("GET", `${base}/auth/profiles`), "profiles"),
   (row) => row.name === "panel",
@@ -416,9 +548,27 @@ await ensure(
         inline: false,
       },
       trigger: { prior: [], reauthAfterS: 300 },
+      rules: marks,
     },
   },
 );
+
+/*
+ * Метка обязательна: профилю, заведённому до неё, недостающие правила
+ * дописываются. Свои правила оператора остаются на месте.
+ */
+const rules = profile.doc?.rules ?? [];
+const missing = marks.filter(
+  (mark) => !rules.some((rule) => rule.on === mark.on && rule.do === "mark" && rule.marker === MARKER),
+);
+
+if (missing.length > 0 && profile.doc !== undefined) {
+  await api("PUT", `${base}/auth/profiles/${profile.uuid}`, {
+    doc: { ...profile.doc, rules: [...rules, ...missing] },
+  });
+  changed = true;
+  say(`дописано: метка ${MARKER} на событиях ${missing.map((mark) => mark.on).join(", ")}`);
+}
 
 const http = await api("GET", `${base}/http`);
 const declared = { ...(http.waf?.inspectors ?? {}) };
@@ -462,21 +612,53 @@ await locations(panel, [
     position: 20,
     protocol: "websocket",
     upstream_id: backend.uuid,
-    waf: gated,
+    waf: { ...gated, ...JOURNAL },
+    upgrade: (row) => (unjournaled(row) ? { waf: { ...row.waf, ...JOURNAL } } : null),
+  },
+  {
+    /*
+     * Выгрузка гео (POST /api/<пространство>/geo/import/<вид>): файлы до 64 МБ.
+     * Модуль тело не читает (pass) и в журнал его не пишет, узел отдаёт его
+     * потоком: буфер тел узла -- tmpfs на те же 64 МБ.
+     */
+    match: "regex",
+    path: "^/api/[^/]+/geo/import/",
+    position: 25,
+    upstream_id: backend.uuid,
+    nginx: { proxyHeaders: "standard", clientMaxBodySize: "64m", proxyRequestBuffering: false },
+    waf: { ...gated, ...JOURNAL, bodyLimit: "request 64m", bodyLimitPolicy: "pass" },
+  },
+  {
+    // Пользователь панели заводится паролем в открытом виде: тело этого пути в журнал не пишется.
+    match: "regex",
+    path: "^/api/[^/]+/auth/user-line$",
+    position: 26,
+    upstream_id: backend.uuid,
+    nginx: { proxyHeaders: "standard" },
+    waf: { ...gated, ...JOURNAL },
   },
   {
     match: "prefix",
     path: "/",
     position: 30,
     upstream_id: backend.uuid,
-    nginx: {
-      proxyHeaders: "standard",
-      // Потолок выгрузки гео у контроллера -- 64 МБ. Буфер тел узла -- tmpfs
-      // на те же 64 МБ, поэтому тело идёт потоком, а не через буфер.
-      clientMaxBodySize: "64m",
-      proxyRequestBuffering: false,
+    nginx: { proxyHeaders: "standard", clientMaxBodySize: BODY },
+    waf: { ...gated, ...JOURNAL_BODY, bodyLimit: `request ${BODY}` },
+    upgrade: (row) => {
+      const patch = {};
+
+      if (unjournaled(row)) {
+        patch.waf = { ...row.waf, ...JOURNAL_BODY, bodyLimit: `request ${BODY}` };
+      }
+
+      // Прежнее умолчание шага: поток до 64 МБ ради выгрузки гео. У неё теперь свой путь.
+      if (row.nginx?.clientMaxBodySize === "64m" && row.nginx?.proxyRequestBuffering === false) {
+        const { proxyRequestBuffering: _, ...nginx } = row.nginx;
+        patch.nginx = { ...nginx, clientMaxBodySize: BODY };
+      }
+
+      return Object.keys(patch).length === 0 ? null : patch;
     },
-    waf: gated,
   },
 ]);
 
@@ -498,6 +680,14 @@ async function publish() {
       agents.every((a) => a.health?.config_hash === sent.config_hash && a.apply === "ok") ||
       agents.map((a) => `${a.health?.node_id}: ${a.apply}`).join(", ")
     );
+  });
+
+  // Пароль и метка работают, когда их применила калитка, а не когда их издали.
+  await until("калитка применила профили и пользователей", 60, async () => {
+    const { channels = [] } = await api("GET", `${base}/convergence`);
+    const auth = channels.find((row) => row.id === "auth");
+
+    return auth?.state === "ok" || `канал auth: ${auth?.state ?? "нет"}`;
   });
 }
 
@@ -562,4 +752,4 @@ try {
 }
 
 say("панель за калиткой: ok");
-process.stdout.write(`${admin}\n`);
+process.stdout.write(admin === "generated" ? `generated ${secret}\n` : `${admin}\n`);
