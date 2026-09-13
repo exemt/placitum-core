@@ -262,30 +262,58 @@ async function server(name, listen, extra = {}) {
 const panel = await server("panel", panelPort);
 const inner = await server("panel-backend", backendPort, { waf: { enabled: false } });
 
+/*
+ * Корень `/` сервер получает сам, вместе с собой: builtin, return 404, удалить
+ * и переадресовать его нельзя. Такой корень -- ещё не решение оператора, и шаг
+ * его настраивает; корень, который уже правили, остаётся как есть.
+ */
+function untouchedRoot(row) {
+  return (
+    row.match === "prefix" &&
+    row.path === "/" &&
+    row.handler === "return" &&
+    row.return_status === 404 &&
+    !row.upstream_id &&
+    !row.raw &&
+    Object.keys(row.waf ?? {}).length === 0 &&
+    Object.keys(row.nginx ?? {}).length === 0
+  );
+}
+
 async function locations(srv, wanted) {
   const have = rows(await api("GET", `${base}/servers/${srv.uuid}/locations`), "locations");
 
   for (const loc of wanted) {
-    await ensure(
-      `путь ${srv.name} ${loc.match === "exact" ? "= " : ""}${loc.path}`,
-      have,
-      (row) => row.path === loc.path && row.match === loc.match,
-      `${base}/servers/${srv.uuid}/locations`,
-      {
-        enabled: true,
-        handler: "proxy",
-        protocol: "http",
-        upstream_uri: null,
-        return_status: null,
-        return_page: null,
-        return_url: null,
-        raw: false,
-        raw_nginx: "",
-        nginx: {},
-        waf: {},
-        ...loc,
-      },
-    );
+    const what = `путь ${srv.name} ${loc.match === "exact" ? "= " : ""}${loc.path}`;
+    const body = {
+      enabled: true,
+      handler: "proxy",
+      protocol: "http",
+      upstream_uri: null,
+      return_status: null,
+      return_page: null,
+      return_url: null,
+      raw: false,
+      raw_nginx: "",
+      nginx: {},
+      waf: {},
+      ...loc,
+    };
+    const same = (row) => row.path === loc.path && row.match === loc.match;
+    const found = have.find(same);
+
+    if (found !== undefined && untouchedRoot(found)) {
+      await api("PUT", `${base}/locations/${found.uuid}`, {
+        ...body,
+        uuid: found.uuid,
+        server_id: srv.uuid,
+      });
+      changed = true;
+      say(`настроено: ${what} (корень сервера)`);
+      continue;
+    }
+
+    await ensure(what, have, same, `${base}/servers/${srv.uuid}/locations`, body);
   }
 }
 
