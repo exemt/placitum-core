@@ -1,9 +1,10 @@
 #!/bin/sh
-# Установка Placitum: окружение, секреты, инфраструктура, компоненты.
+# Установка Placitum: окружение, секреты, инфраструктура, компоненты, панель.
 #
 #     ./install.sh check       только проверки: чем и куда ставим
 #     ./install.sh install     всё по порядку
 #     ./install.sh infra       поднять одну инфраструктуру
+#     ./install.sh panel       завести панель за калиткой на поднятом контуре
 #     ./install.sh status      что поднято и как себя чувствует
 #     ./install.sh down        остановить (тома и данные не трогает)
 #
@@ -69,6 +70,22 @@ preflight() {
 
     printf 'docker compose %s\n' "$version"
 
+    # Движок до 28 пропускал соседей по сети к контейнерам в обход публикации:
+    # порт на 127.0.0.1 или на внутреннем адресе был достижим по адресу
+    # контейнера в bridge. Панель и порты инфраструктуры держатся на этой границе.
+    engine=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)
+
+    case "${engine%%.*}" in
+        ''|*[!0-9]*)
+            warn "не удалось узнать версию docker engine"
+            ;;
+        *)
+            printf 'docker engine %s\n' "$engine"
+            [ "${engine%%.*}" -ge 28 ] ||
+                warn "docker engine $engine: до 28 контейнеры достижимы из сети в обход публикации портов -- обновите движок"
+            ;;
+    esac
+
     command -v openssl >/dev/null 2>&1 || die "нет openssl: им выпускается ключ контура"
 
     # Место: сборка из исходников -- это базовые образы, кеш Go и слои.
@@ -80,6 +97,66 @@ preflight() {
 
     [ -f "$sources" ] || die "нет файла источников: $sources"
     printf 'источники: %s\n' "$sources"
+}
+
+# Чей адрес: частные сети и loopback против всего остального.
+addr_kind() {
+    case "$1" in
+        127.*) echo loopback ;;
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|169.254.*) echo частный ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) echo частный ;;
+        *) echo публичный ;;
+    esac
+}
+
+# Адреса машины, из которых выбирают PLC_PANEL_BIND. Мосты docker не в счёт:
+# на них панель не публикуют.
+host_addrs() {
+    command -v ip >/dev/null 2>&1 || return 0
+
+    printf 'адреса машины:\n'
+    ip -o -4 addr show | while read -r _ dev _ cidr _; do
+        case "$dev" in docker0|br-*|veth*) continue ;; esac
+        printf '  %-16s %-12s %s\n' "${cidr%/*}" "$dev" "$(addr_kind "${cidr%/*}")"
+    done
+}
+
+# Адрес панели на хосте. Docker публикует порт только на адрес, который есть на
+# машине, а порт панели висит на узле защиты: чужой адрес не даст подняться
+# узлу, и вместе с панелью ляжет трафик.
+check_panel() {
+    say "панель"
+
+    # shellcheck disable=SC1090
+    if [ -f "$env_file" ]; then . "$env_file"; else . "$here/.env.example"; fi
+
+    bind=${PLC_PANEL_BIND:-127.0.0.1}
+    port=${PLC_PANEL_PORT:-8081}
+
+    case "$bind" in
+        *:*)
+            die "PLC_PANEL_BIND=$bind: нужен адрес IPv4"
+            ;;
+        127.0.0.1)
+            printf 'панель только с этой машины: http://127.0.0.1:%s (снаружи -- ssh -L)\n' "$port"
+            ;;
+        0.0.0.0)
+            warn "панель на всех адресах машины, в том числе внешних: вход по паролю, но лучше назвать внутренний адрес"
+            host_addrs
+            ;;
+        *)
+            if command -v ip >/dev/null 2>&1 &&
+                ! ip -o -4 addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "$bind"; then
+                host_addrs
+                die "PLC_PANEL_BIND=$bind: такого адреса на машине нет -- узел защиты не поднимется, а с ним и трафик"
+            fi
+
+            [ "$(addr_kind "$bind")" = публичный ] &&
+                warn "панель на публичном адресе $bind: пока она по HTTP, пароль ходит открытым текстом"
+
+            printf 'панель: http://%s:%s\n' "$bind" "$port"
+            ;;
+    esac
 }
 
 # --- окружение и секреты --------------------------------------------------
@@ -167,31 +244,88 @@ components() {
     fi
 }
 
+# Панель за калиткой: на узле сервер panel, на нём калитка auth со списком
+# panel_users, в списке admin. Объекты заводит bootstrap/panel.mjs через API
+# изнутри контейнера контроллера: у машины установки нет обещанных curl и
+# python, а у контроллера есть node и сам API. Пароль admin выпускается здесь,
+# как прочие секреты: в список едет только bcrypt, открытый -- в secrets/.
+panel() {
+    say "панель"
+
+    pass_file="$here/secrets/panel-admin.password"
+    fresh=no
+
+    if [ ! -s "$pass_file" ]; then
+        (umask 077 && openssl rand -base64 48 | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-20 > "$pass_file")
+        fresh=yes
+    fi
+
+    # stdout скрипта -- одно слово: created или kept, ход работы -- в stderr.
+    # Упал -- файл пароля не трогаем: admin мог успеть завестись именно с ним.
+    admin=$(compose waf.yml exec -T controller node --input-type=module \
+        -e "$(cat "$here/bootstrap/panel.mjs")" < "$pass_file") ||
+        die "панель за калиткой не встала; контроллер напрямую -- http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
+
+    case "$admin" in
+        created)
+            printf '\nвход в панель: admin / %s\n' "$(cat "$pass_file")"
+            printf 'пароль сохранён в %s\n' "$pass_file"
+            ;;
+        kept)
+            # Пароль, выпущенный сейчас, никому не достался: список уже был.
+            [ "$fresh" = yes ] && rm -f "$pass_file"
+            printf 'пользователи панели уже заведены: пароль не трогаю\n'
+            ;;
+        *)
+            die "bootstrap/panel.mjs ответил неожиданно: $admin"
+            ;;
+    esac
+}
+
 status() {
     say "состояние"
     compose waf.yml ps
 
+    # shellcheck disable=SC1090
     . "$env_file"
-    printf '\nпанель:  http://localhost:%s\n' "${PLC_PANEL_PORT:-8080}"
+    bind=${PLC_PANEL_BIND:-127.0.0.1}
+    [ "$bind" = 0.0.0.0 ] && bind='<адрес машины>'
+
+    login="вход admin"
+    [ -f "$here/secrets/panel-admin.password" ] &&
+        login="$login, пароль установки -- secrets/panel-admin.password"
+
+    printf '\nпанель:  http://%s:%s -- %s\n' "$bind" "${PLC_PANEL_PORT:-8081}" "$login"
+    printf 'API:     http://127.0.0.1:%s -- без калитки, только с этой машины (снаружи -- ssh -L)\n' \
+        "${PLC_CONTROLLER_PORT:-8080}"
     printf 'трафик:  http://localhost:%s\n' "${PLC_HTTP_PORT:-80}"
 }
 
 case "$cmd" in
     check)
         preflight
+        check_panel
         ;;
     install)
         preflight
         prepare_env
+        check_panel
         infra
         migrate
         components
+        panel
         status
         ;;
     infra)
         preflight
         prepare_env
         infra
+        ;;
+    panel)
+        [ -f "$env_file" ] || die "нет $env_file: панель заводится на поставленном контуре (./install.sh install)"
+        # shellcheck disable=SC1090
+        . "$env_file"
+        panel
         ;;
     status)
         status
@@ -201,7 +335,7 @@ case "$cmd" in
         compose waf.yml down
         ;;
     help|-h|--help)
-        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         die "неизвестная команда: $cmd (см. ./install.sh help)"

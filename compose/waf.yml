@@ -77,6 +77,10 @@ services:
     ports:
       - "${PLC_HTTP_PORT:-80}:8080"
       - "${PLC_HTTPS_PORT:-443}:8443"
+      # Панель для людей: сервер panel на узле, вход через калитку. Заводит его
+      # install.sh (bootstrap/panel.mjs). Адрес на хосте -- PLC_PANEL_BIND, по
+      # умолчанию 127.0.0.1: снаружи панели нет, пока адрес не назван.
+      - "${PLC_PANEL_BIND:-127.0.0.1}:${PLC_PANEL_PORT:-8081}:8081"
     volumes:
       - ../config/edge/agent.conf:/etc/waf/agent.conf:ro
       - ../config/edge/node.conf:/etc/nginx/waf-node.conf:ro
@@ -110,8 +114,11 @@ services:
         # Пин отпечатка ключа контура: панель сверяет им публичный ключ,
         # который вернёт API. Пусто -- сборка пройдёт, но панель предупредит.
         VITE_CONTOUR_FINGERPRINT: ${VITE_CONTOUR_FINGERPRINT:-}
+    # API и панель без калитки -- только на loopback хоста: install.sh, e2e и
+    # аварийный вход, когда узел или калитка лежат (снаружи -- ssh -L). Людям
+    # панель отдаёт узел: порт PLC_PANEL_PORT у edge.
     ports:
-      - "${PLC_PANEL_PORT:-8080}:8080"
+      - "127.0.0.1:${PLC_CONTROLLER_PORT:-8080}:8080"
     environment:
       CONTROLLER_PORT: "8080"
       CONTROLLER_NAME: controller
