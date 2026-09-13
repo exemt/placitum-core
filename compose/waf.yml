@@ -215,7 +215,9 @@ services:
 
   # Страна и ASN по адресу: карточки в панели и правила по гео у инспекторов.
   # Каталоги пустые до первой загрузки оператором -- без них кодер отвечает
-  # «неизвестно», и это рабочее состояние, а не отказ.
+  # «неизвестно», и это рабочее состояние, а не отказ. Выгрузку загружают в
+  # панели («Наборы адресов → Гео / ASN»): кодер скачивает копию у контроллера
+  # и держит её в своём томе, переживая рестарт без контроллера.
   geo:
     <<: *resources
     mem_limit: 4g
@@ -224,10 +226,12 @@ services:
       args: *build
     environment:
       <<: *bus
+      WAF_GEO_CONTROLLER_URL: http://controller:8080
       WAF_GEO_LOG: info
       GOMEMLIMIT: 3GiB
     volumes:
       - ${PLC_GEO_DATA:-../config/geo}:/app/data:ro
+      - geo-copies:/var/lib/waf/geo
     depends_on:
       nats:
         condition: service_healthy
@@ -552,6 +556,7 @@ services:
         condition: service_healthy
 
 volumes:
+  geo-copies:
   edge-data:
   edge-store:
   vlai-checkpoint:
