@@ -524,10 +524,18 @@ async function probe() {
     return `GET ${where} -> ${page.status}`;
   }
 
-  const open = await fetch(`${EDGE}/api/spaces`);
+  /*
+   * redirect: manual обязателен: fetch по умолчанию идёт за 303 на форму и
+   * получает её 200 -- открытой панель от этого не становится. Accept JSON --
+   * ветка API: калитка отвечает на неё 401, а не уводит на форму.
+   */
+  const open = await fetch(`${EDGE}/api/spaces`, {
+    redirect: "manual",
+    headers: { accept: "application/json" },
+  });
 
-  if (open.status === 200) {
-    throw new Fatal("панель открыта без входа: /api/spaces через узел ответил 200 без сессии");
+  if (open.status >= 200 && open.status < 300) {
+    throw new Fatal(`панель открыта без входа: /api/spaces через узел ответил ${open.status} без сессии`);
   }
 
   return open.status === 401 || `GET /api/spaces -> ${open.status}`;
