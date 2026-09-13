@@ -2,4 +2,7 @@
 .env
 sources.local.env
 
+# Журнал установки: пишет install.sh, у каждой машины свой.
+install.log
+
 # Секреты -- свой белый список в secrets/.gitignore

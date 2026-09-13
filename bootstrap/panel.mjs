@@ -23,9 +23,10 @@
  * generated <пароль>. Ход работы -- в stderr.
  *
  * Заводится то, чего нет; то, что есть, не трогается, кроме того, без чего
- * панель не панель: пароля admin по просьбе, метки panel в профиле калитки и
- * журнала на путях, где его не задавали. Рассылка -- только если что-то
- * поменялось: она публикует заодно и черновики оператора в тех же каналах.
+ * панель не панель: пароля admin по просьбе, метки panel в профиле калитки,
+ * журнала на путях, где его не задавали, и resolve у узлов её пулов. Рассылка --
+ * только если что-то поменялось: она публикует заодно и черновики оператора в
+ * тех же каналах.
  */
 
 import { randomBytes } from "node:crypto";
@@ -37,11 +38,28 @@ const EDGE = "http://edge:8081";
 const MODE = process.env.PANEL_ADMIN ?? "ensure";
 
 const PANEL_PORT = 8081;
-const BACKEND_PORT = 18081;
 const LOGIN = "/waf/panel-login";
 const USERS = "panel_users";
 const GATE = "auth-panel";
 const ADMIN = "admin";
+
+/*
+ * Узел отдаёт панель в контроллер и в форму входа по именам контейнеров. Имена
+ * резолвятся на лету -- resolve у узла пула и resolver Docker в http: пока
+ * контейнера нет в DNS, `nginx -t` поколение не отвергает, и лежащий контроллер --
+ * это 502 одной панели, а не узел без конфигурации. Агент упавший `nginx -t` не
+ * повторяет.
+ */
+const RESOLVER = ["127.0.0.11", "valid=10s", "ipv6=off"];
+const CONTROLLER = { pool: "panel", host: "controller", port: 8080 };
+const FORM = { pool: "panel-login", host: "auth-http", port: 8080 };
+
+/*
+ * Прежняя раскладка шага: узел ходил пулом в свой внутренний сервер на
+ * 127.0.0.1:18081, а тот -- в контейнеры. Пути панели переезжают на пулы выше,
+ * сервер, его порт и пул снимаются.
+ */
+const LEGACY_PORT = 18081;
 
 /*
  * Метка всех запросов к панели в аудите. Рядом с пользователем сессии она
@@ -143,27 +161,6 @@ async function until(what, seconds, check) {
   }
 }
 
-/*
- * Узел ходит в контроллер и форму входа не апстримом, а через свой внутренний
- * сервер на 127.0.0.1:18081, где адрес резолвится на лету. Имя в апстриме
- * резолвится при загрузке конфигурации: пока контейнера controller нет в DNS,
- * `nginx -t` отверг бы поколение целиком -- и без конфигурации остался бы весь
- * трафик узла, а агент упавший `nginx -t` не повторяет. Через resolver
- * лежащий контроллер -- это 502 одной панели.
- */
-function passTo(target, extra = []) {
-  return [
-    "resolver 127.0.0.11 valid=10s ipv6=off;",
-    `set $panel_target ${target};`,
-    ...extra,
-    "proxy_set_header Host $host;",
-    // Адрес клиента проставил внешний сервер: передаём как есть, не дописывая.
-    "proxy_set_header X-Forwarded-For $http_x_forwarded_for;",
-    "proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;",
-    "proxy_pass http://$panel_target;",
-  ].join("\n");
-}
-
 if (MODE !== "ensure" && MODE !== "reset") {
   throw new Error(`PANEL_ADMIN: ждал ensure или reset, пришло ${JSON.stringify(MODE)}`);
 }
@@ -186,6 +183,21 @@ if (space === undefined) {
 }
 
 const base = `/api/${space.uuid}`;
+
+/* Настройки http: ручка принимает их только целиком. */
+async function patchHttp(patch) {
+  const http = await api("GET", `${base}/http`);
+
+  await api("PUT", `${base}/http`, {
+    nginx_main: http.nginx_main,
+    nginx: http.nginx,
+    waf_http: http.waf_http,
+    waf: http.waf,
+    raw: http.raw,
+    raw_nginx: http.raw_nginx,
+    ...patch(http),
+  });
+}
 
 /* --- запись отказа ------------------------------------------------------ */
 
@@ -291,42 +303,96 @@ if (current === undefined) {
   }
 }
 
-/* --- апстрим, порты, серверы -------------------------------------------- */
+/* --- resolver, пулы, порт, сервер --------------------------------------- */
 
-// Апстрим узнаётся по адресу внутреннего сервера: имя правят в панели.
-const backend = await ensure(
-  `апстрим panel-backend -> 127.0.0.1:${BACKEND_PORT}`,
-  rows(await api("GET", `${base}/upstreams`), "upstreams"),
-  (row) =>
-    (row.peers ?? []).some((peer) => peer.host === "127.0.0.1" && peer.port === BACKEND_PORT) ||
-    row.name === "panel-backend",
-  `${base}/upstreams`,
-  {
-    name: "panel-backend",
-    method: "round_robin",
-    peers: [{ host: "127.0.0.1", port: BACKEND_PORT, weight: 1 }],
-  },
+const { nginx: httpNginx } = await api("GET", `${base}/http`);
+
+if ((httpNginx?.resolver ?? []).length === 0) {
+  await patchHttp((http) => ({ nginx: { ...(http.nginx ?? {}), resolver: RESOLVER } }));
+  changed = true;
+  say(`заведено: resolver ${RESOLVER.join(" ")} (DNS Docker)`);
+} else {
+  say(`уже есть: resolver ${httpNginx.resolver.join(" ")}`);
+}
+
+const pools = rows(await api("GET", `${base}/upstreams`), "upstreams");
+
+const peerOf = (row, target) =>
+  (row.peers ?? []).find((peer) => peer.host === target.host && peer.port === target.port);
+
+/* Узел пула в теле PUT: ручка принимает пул узлов только целиком. */
+const peerBody = (peer, resolve) => ({
+  host: peer.host,
+  port: peer.port,
+  weight: peer.weight,
+  max_fails: peer.max_fails,
+  fail_timeout_ms: peer.fail_timeout_ms,
+  backup: peer.backup,
+  down: peer.down,
+  resolve,
+});
+
+/*
+ * Пул узнаётся по узлу, а не по имени: имя правят в панели. Узлу без resolve
+ * (пул заведён руками) он дописывается: без него поколение падает на `nginx -t`,
+ * пока контейнера нет в DNS.
+ */
+async function pool(target) {
+  const found = pools.find((row) => peerOf(row, target) !== undefined);
+  const what = `пул ${target.pool} -> ${target.host}:${target.port} resolve`;
+
+  if (found === undefined) {
+    const row = await api("POST", `${base}/upstreams`, {
+      name: target.pool,
+      method: "round_robin",
+      peers: [{ host: target.host, port: target.port, weight: 1, resolve: true }],
+    });
+    changed = true;
+    say(`заведено: ${what}`);
+    return row;
+  }
+
+  const peer = peerOf(found, target);
+
+  if (peer.resolve === true) {
+    say(`уже есть: ${what}`);
+    return found;
+  }
+
+  const row = await api("PUT", `${base}/upstreams/${found.uuid}`, {
+    peers: found.peers.map((item) => peerBody(item, item === peer ? true : item.resolve === true)),
+  });
+  changed = true;
+  say(`обновлено: пул ${found.name} (resolve у ${target.host}:${target.port})`);
+  return row;
+}
+
+const controllerPool = await pool(CONTROLLER);
+const formPool = await pool(FORM);
+
+// Пулы прежней раскладки: узел на внутренний сервер 127.0.0.1:18081.
+const legacyPools = new Set(
+  pools
+    .filter((row) =>
+      (row.peers ?? []).some((peer) => peer.host === "127.0.0.1" && peer.port === LEGACY_PORT),
+    )
+    .map((row) => row.uuid),
 );
 
 const ports = rows(await api("GET", `${base}/ports`), "ports");
 
-function port(name, address, number) {
-  return ensure(
-    `порт ${name} (${address}:${number})`,
-    ports,
-    (row) => row.port === number,
-    `${base}/ports`,
-    { name, address, port: number, ssl: false, http2: false, proxy_protocol: false },
-  );
-}
-
-const panelPort = await port("panel", "0.0.0.0", PANEL_PORT);
-const backendPort = await port("panel-backend", "127.0.0.1", BACKEND_PORT);
+const panelPort = await ensure(
+  `порт panel (0.0.0.0:${PANEL_PORT})`,
+  ports,
+  (row) => row.port === PANEL_PORT,
+  `${base}/ports`,
+  { name: "panel", address: "0.0.0.0", port: PANEL_PORT, ssl: false, http2: false, proxy_protocol: false },
+);
 
 const servers = rows(await api("GET", `${base}/servers`), "servers");
 
 // Кто какой порт слушает: сервер панели узнаётся по своему порту, а не по
-// имени -- имя правят в панели, а порт у каждого сервера панели свой.
+// имени -- имя правят в панели.
 const bound = new Map();
 
 for (const row of servers) {
@@ -338,11 +404,11 @@ for (const row of servers) {
 }
 
 /*
- * Порт у каждого сервера свой, и сервер на нём -- default_server: имя, которым
- * пришли (адрес машины, её имя в сети), панели безразлично. server_name -- имя
- * сервера, а не `_`: карточка в панели берёт имя из него.
+ * Сервер на своём порту -- default_server: имя, которым пришли (адрес машины,
+ * её имя в сети), панели безразлично. server_name -- имя сервера, а не `_`:
+ * карточка в панели берёт имя из него.
  */
-async function server(name, listen, extra = {}) {
+async function server(name, listen) {
   const held = bound.get(listen.uuid);
 
   if (held !== undefined) {
@@ -355,7 +421,7 @@ async function server(name, listen, extra = {}) {
     servers,
     (item) => item.name === name,
     `${base}/servers`,
-    { name, server_names: [name], enabled: true, ...extra },
+    { name, server_names: [name], enabled: true },
   );
 
   await api("POST", `${base}/servers/${row.uuid}/ports`, {
@@ -369,7 +435,6 @@ async function server(name, listen, extra = {}) {
 }
 
 const panel = await server("panel", panelPort);
-const inner = await server("panel-backend", backendPort, { waf: { enabled: false } });
 
 /*
  * Корень `/` сервер получает сам, вместе с собой: builtin, return 404, удалить
@@ -429,7 +494,12 @@ async function locations(srv, wanted) {
       continue;
     }
 
-    const patch = found !== undefined && upgrade !== undefined ? upgrade(found) : null;
+    let patch = found !== undefined && upgrade !== undefined ? upgrade(found) : null;
+
+    // Путь прежней раскладки смотрит в пул внутреннего сервера: переезжает на свой.
+    if (found !== undefined && legacyPools.has(found.upstream_id)) {
+      patch = { ...(patch ?? {}), upstream_id: loc.upstream_id };
+    }
 
     if (patch !== null) {
       await api("PUT", `${base}/locations/${found.uuid}`, {
@@ -446,42 +516,6 @@ async function locations(srv, wanted) {
   }
 }
 
-/* Внутренний сервер: только проводка до контейнеров, ни калитки, ни модуля. */
-await locations(inner, [
-  {
-    match: "prefix",
-    path: LOGIN,
-    position: 10,
-    handler: "static",
-    raw: true,
-    raw_nginx: passTo("auth-http:8080"),
-  },
-  {
-    match: "exact",
-    path: "/agent_health_socket",
-    position: 20,
-    handler: "static",
-    raw: true,
-    raw_nginx: passTo("controller:8080", [
-      "proxy_http_version 1.1;",
-      "proxy_read_timeout 1h;",
-      "proxy_set_header Upgrade $http_upgrade;",
-      'proxy_set_header Connection "upgrade";',
-    ]),
-  },
-  {
-    match: "prefix",
-    path: "/",
-    position: 30,
-    handler: "static",
-    raw: true,
-    raw_nginx: passTo("controller:8080", [
-      "client_max_body_size 64m;",
-      "proxy_request_buffering off;",
-    ]),
-  },
-]);
-
 /*
  * Форма входа -- до источника: источник сверяет свой адрес с путями сервера.
  * Заголовки -- стандартный набор: адрес клиента форма берёт из последнего
@@ -493,7 +527,7 @@ await locations(panel, [
     match: "prefix",
     path: LOGIN,
     position: 10,
-    upstream_id: backend.uuid,
+    upstream_id: formPool.uuid,
     nginx: { proxyHeaders: "standard" },
     waf: { enabled: false },
   },
@@ -570,20 +604,15 @@ if (missing.length > 0 && profile.doc !== undefined) {
   say(`дописано: метка ${MARKER} на событиях ${missing.map((mark) => mark.on).join(", ")}`);
 }
 
-const http = await api("GET", `${base}/http`);
-const declared = { ...(http.waf?.inspectors ?? {}) };
+const { waf: httpWaf } = await api("GET", `${base}/http`);
 
-if (declared[GATE] === undefined) {
-  declared[GATE] = { process: "auth", profile: "panel" };
-
-  await api("PUT", `${base}/http`, {
-    nginx_main: http.nginx_main,
-    nginx: http.nginx,
-    waf_http: http.waf_http,
-    waf: { ...(http.waf ?? {}), inspectors: declared },
-    raw: http.raw,
-    raw_nginx: http.raw_nginx,
-  });
+if (httpWaf?.inspectors?.[GATE] === undefined) {
+  await patchHttp((http) => ({
+    waf: {
+      ...(http.waf ?? {}),
+      inspectors: { ...(http.waf?.inspectors ?? {}), [GATE]: { process: "auth", profile: "panel" } },
+    },
+  }));
   changed = true;
   say(`заведено: объявление ${GATE} (процесс auth, профиль panel)`);
 } else {
@@ -611,7 +640,7 @@ await locations(panel, [
     path: "/agent_health_socket",
     position: 20,
     protocol: "websocket",
-    upstream_id: backend.uuid,
+    upstream_id: controllerPool.uuid,
     waf: { ...gated, ...JOURNAL },
     upgrade: (row) => (unjournaled(row) ? { waf: { ...row.waf, ...JOURNAL } } : null),
   },
@@ -624,7 +653,7 @@ await locations(panel, [
     match: "regex",
     path: "^/api/[^/]+/geo/import/",
     position: 25,
-    upstream_id: backend.uuid,
+    upstream_id: controllerPool.uuid,
     nginx: { proxyHeaders: "standard", clientMaxBodySize: "64m", proxyRequestBuffering: false },
     waf: { ...gated, ...JOURNAL, bodyLimit: "request 64m", bodyLimitPolicy: "pass" },
   },
@@ -633,7 +662,7 @@ await locations(panel, [
     match: "regex",
     path: "^/api/[^/]+/auth/user-line$",
     position: 26,
-    upstream_id: backend.uuid,
+    upstream_id: controllerPool.uuid,
     nginx: { proxyHeaders: "standard" },
     waf: { ...gated, ...JOURNAL },
   },
@@ -641,7 +670,7 @@ await locations(panel, [
     match: "prefix",
     path: "/",
     position: 30,
-    upstream_id: backend.uuid,
+    upstream_id: controllerPool.uuid,
     nginx: { proxyHeaders: "standard", clientMaxBodySize: BODY },
     waf: { ...gated, ...JOURNAL_BODY, bodyLimit: `request ${BODY}` },
     upgrade: (row) => {
@@ -661,6 +690,38 @@ await locations(panel, [
     },
   },
 ]);
+
+/* --- прежняя раскладка -------------------------------------------------- */
+
+/*
+ * Внутренний сервер, его порт и пул больше не нужны. Снять их не удалось --
+ * панель работает и без этого, поэтому это предупреждение, а не сорванная
+ * установка.
+ */
+async function drop(what, path) {
+  try {
+    await api("DELETE", path);
+    changed = true;
+    say(`снято: ${what}`);
+  } catch (err) {
+    say(`оставлено: ${what} (${err.message})`);
+  }
+}
+
+const legacyPort = ports.find((row) => row.port === LEGACY_PORT);
+const legacyServer = legacyPort === undefined ? undefined : bound.get(legacyPort.uuid);
+
+if (legacyServer !== undefined) {
+  await drop(`внутренний сервер ${legacyServer.name}`, `${base}/servers/${legacyServer.uuid}`);
+}
+
+if (legacyPort !== undefined) {
+  await drop(`порт ${legacyPort.name} (127.0.0.1:${LEGACY_PORT})`, `${base}/ports/${legacyPort.uuid}`);
+}
+
+for (const row of pools.filter((item) => legacyPools.has(item.uuid))) {
+  await drop(`пул ${row.name}`, `${base}/upstreams/${row.uuid}`);
+}
 
 /* --- рассылка и проверка ------------------------------------------------ */
 

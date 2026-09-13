@@ -23,6 +23,10 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 env_file="$here/.env"
 sources="$here/sources.env"
 
+# Журнал установки: вывод docker compose, сборки и шага панели целиком. На экране
+# от долгих шагов остаётся строка с итогом, а при сбое -- хвост этого журнала.
+log_file="$here/install.log"
+
 # Версия и ревизия сборки: едут в образы метками OCI и в бинарь каждого
 # процесса -- их видно в журнале старта и в кадре присутствия. Версия -- тег
 # core, если установка стоит на теге, иначе dev; ревизия -- коммит core.
@@ -45,10 +49,48 @@ say()  { printf '\n== %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf '!! %s\n' "$*" >&2; exit 1; }
 
+# Журнал без цвета и перерисовок: его читают глазами и grep, а не терминалом.
 compose() {
     file=$1
     shift
-    docker compose --env-file "$env_file" --env-file "$sources" -f "$here/compose/$file" "$@"
+    docker compose --ansi never --progress plain \
+        --env-file "$env_file" --env-file "$sources" -f "$here/compose/$file" "$@"
+}
+
+elapsed() {
+    s=$(( $(date +%s) - $1 ))
+
+    if [ "$s" -ge 60 ]; then
+        printf '%d мин %02d с' $((s / 60)) $((s % 60))
+    else
+        printf '%d с' "$s"
+    fi
+}
+
+# Хвост журнала при сбое: причина почти всегда в последних строках.
+log_tail() {
+    tail -n 30 "$log_file" | sed 's/^/    | /' >&2
+}
+
+# quietly <что> <команда…>: вывод команды -- в журнал, на экран -- строка шага.
+# Простыня compose на экране не показывает сути, а долгий шаг без строки
+# выглядел бы зависшим.
+quietly() {
+    what=$1
+    shift
+    started=$(date +%s)
+
+    printf '  %s ... ' "$what"
+    printf '\n== %s %s\n' "$(date '+%F %T')" "$what" >> "$log_file"
+
+    if "$@" >> "$log_file" 2>&1; then
+        printf 'готово, %s\n' "$(elapsed "$started")"
+        return 0
+    fi
+
+    printf 'сбой\n'
+    log_tail
+    die "$what: не удалось, журнал целиком -- $log_file"
 }
 
 # --- проверки -------------------------------------------------------------
@@ -69,8 +111,6 @@ preflight() {
         die "нужен docker compose 2.20 или новее (есть $version): установка держится на include"
     fi
 
-    printf 'docker compose %s\n' "$version"
-
     # Движок до 28 пропускал соседей по сети к контейнерам в обход публикации:
     # порт на 127.0.0.1 или на внутреннем адресе был достижим по адресу
     # контейнера в bridge. Панель и порты инфраструктуры держатся на этой границе.
@@ -78,10 +118,11 @@ preflight() {
 
     case "${engine%%.*}" in
         ''|*[!0-9]*)
+            printf 'docker compose %s\n' "$version"
             warn "не удалось узнать версию docker engine"
             ;;
         *)
-            printf 'docker engine %s\n' "$engine"
+            printf 'docker %s, compose %s\n' "$engine" "$version"
             [ "${engine%%.*}" -ge 28 ] ||
                 warn "docker engine $engine: до 28 контейнеры достижимы из сети в обход публикации портов -- обновите движок"
             ;;
@@ -110,15 +151,21 @@ addr_kind() {
     esac
 }
 
-# Адреса машины, из которых выбирают PLC_PANEL_BIND. Мосты docker не в счёт:
-# на них панель не публикуют.
-host_addrs() {
+# Адреса машины без мостов docker: на них панель не публикуют.
+machine_addrs() {
     command -v ip >/dev/null 2>&1 || return 0
 
-    printf 'адреса машины:\n'
     ip -o -4 addr show | while read -r _ dev _ cidr _; do
         case "$dev" in docker0|br-*|veth*) continue ;; esac
-        printf '  %-16s %-12s %s\n' "${cidr%/*}" "$dev" "$(addr_kind "${cidr%/*}")"
+        printf '%s %s\n' "${cidr%/*}" "$dev"
+    done
+}
+
+# Адреса машины, из которых выбирают PLC_PANEL_BIND.
+host_addrs() {
+    printf 'адреса машины:\n'
+    machine_addrs | while read -r addr dev; do
+        printf '  %-16s %-12s %s\n' "$addr" "$dev" "$(addr_kind "$addr")"
     done
 }
 
@@ -225,11 +272,10 @@ prepare_env() {
         printf 'окружение на месте: %s\n' "$env_file"
     fi
 
-    say "секреты"
     # shellcheck disable=SC1090
     . "$env_file"
-    MINIO_ROOT_USER=${MINIO_ROOT_USER:-waf} MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-wafwafwaf} \
-        sh "$here/bootstrap/secrets.sh"
+    quietly "ключи и секреты" env MINIO_ROOT_USER="${MINIO_ROOT_USER:-waf}" \
+        MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-wafwafwaf}" sh "$here/bootstrap/secrets.sh"
 
     # Отпечаток ключа зашивается в панель на сборке: пин, отставший от ключа,
     # выключает сверку публичного ключа в браузере.
@@ -269,33 +315,32 @@ infra_services="nats nats-box postgres clickhouse redis redis-internal minio min
 infra() {
     say "инфраструктура"
     # shellcheck disable=SC2086
-    compose waf.yml up -d --wait $infra_services
+    quietly "postgres, clickhouse, redis, nats, minio" compose waf.yml up -d --wait $infra_services
 }
 
 # Схему Postgres накатывает контроллер -- она едет в его образе, и он же
-# делает это при каждом старте. Отдельный шаг здесь нужен ради порядка и
-# отчёта: сначала схема, потом процессы, и видно, что именно применилось.
+# делает это при каждом старте. Отдельный шаг здесь нужен ради порядка: сначала
+# схема, потом процессы. Что именно применилось -- в журнале.
 # --no-deps: инфраструктура уже поднята предыдущим шагом, а зависимости
 # сервиса controller потянули бы за собой половину контура.
 migrate() {
     say "схема базы"
 
     if [ "$build" = yes ]; then
-        compose waf.yml build controller
+        quietly "сборка контроллера" compose waf.yml build controller
     fi
 
-    compose waf.yml run --rm --no-deps controller node src/migrate.ts --check
-    compose waf.yml run --rm --no-deps controller node src/migrate.ts
+    quietly "миграции" compose waf.yml run --rm --no-deps controller node src/migrate.ts
 }
 
 components() {
     say "компоненты"
 
     if [ "$build" = yes ]; then
-        compose waf.yml up -d --build --wait
-    else
-        compose waf.yml up -d --wait
+        quietly "сборка образов (первая установка -- до получаса)" compose waf.yml build
     fi
+
+    quietly "запуск и проверка здоровья" compose waf.yml up -d --wait
 }
 
 # Панель за калиткой: на узле сервер panel, на нём калитка auth со списком
@@ -308,12 +353,21 @@ components() {
 panel() {
     say "панель"
 
+    started=$(date +%s)
+    printf '  калитка, admin и рассылка на узел ... '
+    printf '\n== %s панель\n' "$(date '+%F %T')" >> "$log_file"
+
     # stdin -- пароль (может быть пустым); stdout -- одна строка: created,
-    # updated, kept или generated <пароль>. Ход работы -- в stderr.
-    result=$(printf '%s' "$panel_pass" |
+    # updated, kept или generated <пароль>. Ход работы -- в журнал.
+    if ! result=$(printf '%s' "$panel_pass" |
         compose waf.yml exec -T -e "PANEL_ADMIN=${1:-ensure}" controller \
-            node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")") ||
-        die "панель за калиткой не встала; контроллер напрямую -- http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
+            node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")" 2>> "$log_file"); then
+        printf 'сбой\n'
+        log_tail
+        die "панель за калиткой не встала, журнал -- $log_file; контроллер напрямую -- http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
+    fi
+
+    printf 'готово, %s\n' "$(elapsed "$started")"
 
     case "$result" in
         created)
@@ -335,6 +389,27 @@ panel() {
     esac
 }
 
+# Рассылка: свежая установка -- пустой KV, и процессы живут на умолчаниях своих
+# образов, а панель показывает это расхождением. bootstrap/publish.mjs издаёт
+# каждый несошедшийся канал и ждёт отчётов получателей.
+publish() {
+    say "рассылка"
+
+    started=$(date +%s)
+    printf '  каналы конфигурации процессам ... '
+    printf '\n== %s рассылка\n' "$(date '+%F %T')" >> "$log_file"
+
+    if ! result=$(compose waf.yml exec -T controller \
+        node --input-type=module -e "$(cat "$here/bootstrap/publish.mjs")" 2>> "$log_file"); then
+        printf 'сбой\n'
+        log_tail
+        die "каналы конфигурации не сошлись, журнал -- $log_file"
+    fi
+
+    printf 'готово, %s\n' "$(elapsed "$started")"
+    printf '%s\n' "$result"
+}
+
 # Смена пароля -- она же аварийный вход: снимаются и блокировки калитки
 # панели по логину и по адресу, иначе забывший пароль ждал бы ещё 15 минут.
 panel_password() {
@@ -346,20 +421,43 @@ panel_password() {
         printf 'блокировки входа в панель сняты\n'
 }
 
-status() {
-    say "состояние"
-    compose waf.yml ps
+# Одна строка вместо таблицы: сколько контейнеров и какие не в порядке.
+health() {
+    rows=$(compose waf.yml ps -a --format '{{.Service}} {{.State}} {{.Health}}')
+    total=$(printf '%s\n' "$rows" | grep -c . || true)
+    bad=$(printf '%s\n' "$rows" | awk 'NF && ($2 != "running" || ($3 != "" && $3 != "healthy"))')
 
+    if [ -z "$bad" ]; then
+        printf 'контейнеры: %s, все работают\n' "$total"
+        return 0
+    fi
+
+    warn "контейнеры не в порядке ($(printf '%s\n' "$bad" | grep -c .) из $total):"
+    printf '%s\n' "$bad" | sed 's/^/     /' >&2
+}
+
+# Итог: куда идти и чем входить.
+summary() {
     # shellcheck disable=SC1090
     . "$env_file"
     bind=${PLC_PANEL_BIND:-127.0.0.1}
-    [ "$bind" = 0.0.0.0 ] && bind='<адрес машины>'
+    port=${PLC_PANEL_PORT:-8081}
 
-    printf '\nпанель:  http://%s:%s -- вход admin, сменить пароль -- ./install.sh panel-password\n' \
-        "$bind" "${PLC_PANEL_PORT:-8081}"
+    printf '\n'
+
+    if [ "$bind" = 0.0.0.0 ]; then
+        machine_addrs | while read -r addr _; do
+            printf 'панель:  http://%s:%s\n' "$addr" "$port"
+        done
+    else
+        printf 'панель:  http://%s:%s\n' "$bind" "$port"
+    fi
+
+    printf 'вход:    admin, сменить пароль -- ./install.sh panel-password\n'
     printf 'API:     http://127.0.0.1:%s -- без калитки, только с этой машины (снаружи -- ssh -L)\n' \
         "${PLC_CONTROLLER_PORT:-8080}"
-    printf 'трафик:  http://localhost:%s\n' "${PLC_HTTP_PORT:-80}"
+    printf 'трафик:  порт %s\n' "${PLC_HTTP_PORT:-80}"
+    printf 'журнал:  %s\n' "$log_file"
 }
 
 case "$cmd" in
@@ -368,6 +466,7 @@ case "$cmd" in
         check_panel
         ;;
     install)
+        : > "$log_file"
         preflight
         prepare_env
         check_panel
@@ -376,7 +475,10 @@ case "$cmd" in
         migrate
         components
         panel
-        status
+        publish
+        say "готово"
+        health
+        summary
         ;;
     infra)
         preflight
@@ -395,7 +497,11 @@ case "$cmd" in
         fi
         ;;
     status)
-        status
+        say "состояние"
+        compose waf.yml ps
+        printf '\n'
+        health
+        summary
         ;;
     down)
         say "остановка"
