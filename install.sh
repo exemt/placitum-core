@@ -318,9 +318,9 @@ infra() {
     quietly "postgres, clickhouse, redis, nats, minio" compose waf.yml up -d --wait $infra_services
 }
 
-# Схему Postgres накатывает контроллер -- она едет в его образе, и он же
-# делает это при каждом старте. Отдельный шаг здесь нужен ради порядка: сначала
-# схема, потом процессы. Что именно применилось -- в журнале.
+# Схема Postgres едет в образе контроллера: на пустой базе он ставит её сам, на
+# базе со схемой ничего не делает. Отдельный шаг здесь нужен ради порядка:
+# сначала схема, потом процессы.
 # --no-deps: инфраструктура уже поднята предыдущим шагом, а зависимости
 # сервиса controller потянули бы за собой половину контура.
 migrate() {
@@ -330,7 +330,7 @@ migrate() {
         quietly "сборка контроллера" compose waf.yml build controller
     fi
 
-    quietly "миграции" compose waf.yml run --rm --no-deps controller node src/migrate.ts
+    quietly "схема Postgres" compose waf.yml run --rm --no-deps controller node src/migrate.ts
 }
 
 components() {

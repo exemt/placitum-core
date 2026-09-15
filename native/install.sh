@@ -716,7 +716,7 @@ as_placitum() {
 
 schema() {
     say "схема"
-    quietly "миграции Postgres" as_placitum node src/migrate.ts
+    quietly "схема Postgres" as_placitum node src/migrate.ts
 }
 
 # Пин отпечатка ключа контура зашит в сборку панели, а ключ у установки свой.

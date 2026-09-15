@@ -151,7 +151,7 @@ services:
         condition: service_started
 
   # Поток аудита и журнала процессов в ClickHouse. Схему ClickHouse накатывает
-  # он же при старте: DDL принадлежит владельцу данных (core/migrate/README.md).
+  # он же при старте: DDL принадлежит владельцу данных.
   logger:
     <<: *resources
     build:

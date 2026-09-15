@@ -138,8 +138,8 @@ cp sources.env sources.local.env
 - `vlai` — классификатор текста. По умолчанию не запускается: он тяжёлый и при первом старте
   скачивает модель. Как включить, написано в [INSTALL.md](INSTALL.md#что-поднимается).
 
-Схему баз сервисы накатывают сами при старте: ClickHouse — `logger`, PostgreSQL — `controller`.
-Подробнее в [migrate/README.md](migrate/README.md).
+Схему баз сервисы ставят сами при старте: ClickHouse — `logger`, PostgreSQL — `controller`, на
+пустой базе.
 
 ## Установка без Docker
 
@@ -157,7 +157,6 @@ sources.env     откуда брать исходники компоненто�
 compose/        compose-файлы: infra.yml — инфраструктура, waf.yml — всё вместе
 config/         конфиги NATS, ClickHouse, MinIO и узла, каталоги для геоданных
 bootstrap/      первичная настройка: ключи, потоки NATS, панель, рассылка настроек
-migrate/        как накатывается схема базы
 native/         установка без Docker
 secrets/        ключи установки, в git не попадают
 ```
