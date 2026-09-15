@@ -1,0 +1,2 @@
+# LF everywhere: install.sh with CRLF line endings does not run on Linux.
+* text=auto eol=lf

@@ -1,0 +1,23 @@
+# Infrastructure ports on host loopback (PLC_INFRA_PORTS=loopback), never on 0.0.0.0.
+services:
+  nats:
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"   # monitoring
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+  clickhouse:
+    ports:
+      - "127.0.0.1:8123:8123"   # HTTP
+      - "127.0.0.1:9000:9000"   # native
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+  redis-internal:
+    ports:
+      - "127.0.0.1:6380:6379"
+  minio:
+    ports:
+      - "127.0.0.1:9002:9000"   # S3 API; 9000 is taken by ClickHouse
+      - "127.0.0.1:9001:9001"   # console

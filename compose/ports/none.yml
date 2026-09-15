@@ -1,0 +1,2 @@
+# No infrastructure ports on the host (PLC_INFRA_PORTS=none).
+services: {}

@@ -1,0 +1,155 @@
+# Infrastructure from official images, included by waf.yml. Paths are relative to this file.
+
+name: placitum
+
+x-resources: &resources
+  cpus: "2.0"
+  mem_limit: 1g
+
+services:
+
+  nats:
+    # The bus carries every inspector exchange; two cores are not enough under load.
+    cpus: "6.0"
+    <<: *resources
+    image: nats:2.12-alpine
+    command: ["--config", "/etc/nats/nats-server.conf"]
+    volumes:
+      - ../config/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+
+  # Creates the JetStream streams, then stays up for the nats CLI.
+  nats-box:
+    <<: *resources
+    image: natsio/nats-box:latest
+    entrypoint: ["sh", "-c", "sh /etc/waf/streams.sh; exec sleep infinity"]
+    environment:
+      NATS_URL: nats://nats:4222
+    volumes:
+      - ../bootstrap:/etc/waf:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nats", "stream", "info", "WAF_AUDIT"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+  postgres:
+    <<: *resources
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-waf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waf}
+      POSTGRES_DB: ${POSTGRES_DB:-waf}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waf} -d ${POSTGRES_DB:-waf}"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+
+  clickhouse:
+    cpus: "2.0"
+    mem_limit: 2g
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_LOG_LEVEL: ${CLICKHOUSE_LOG_LEVEL:-warning}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ../config/clickhouse/logger.xml:/etc/clickhouse-server/config.d/logger.xml:ro
+      - ../config/clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/system-logs.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "${CLICKHOUSE_USER:-waf}",
+             "--password", "${CLICKHOUSE_PASSWORD:-waf}", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    <<: *resources
+    mem_limit: 2560m
+    image: redis:7.4-alpine
+    # noeviction: an evicted request object would silently skip inspection.
+    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 3s
+
+  # Configuration blobs and inspector state.
+  redis-internal:
+    <<: *resources
+    mem_limit: 512m
+    image: redis:7.4-alpine
+    command: ["redis-server", "--maxmemory", "400mb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 3s
+
+  minio:
+    <<: *resources
+    mem_limit: 2g
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    hostname: minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-waf}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-wafwafwaf}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+      start_period: 8s
+
+  # Applies bucket lifecycle rules, then stays up for the mc CLI.
+  minio-mc:
+    <<: *resources
+    image: quay.io/minio/mc:latest
+    entrypoint: ["sh", "-c",
+                 "sh /etc/waf/lifecycle.sh && touch /tmp/ready; exec sleep infinity"]
+    environment:
+      MC_HOST_waf: http://${MINIO_ROOT_USER:-waf}:${MINIO_ROOT_PASSWORD:-wafwafwaf}@minio:9000
+    volumes:
+      - ../config/minio:/etc/waf:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+volumes:
+  nats-data:
+  postgres-data:
+  clickhouse-data:
+  minio-data:
