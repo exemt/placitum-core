@@ -25,9 +25,11 @@ const MARKED = ["authenticated", "anonymous", "invalid", "forbidden"];
 const MASKS = ["request headers mask=cookie,authorization", "request args mask=password"];
 const PREVIEW = ["request headers=8k/1k args=8k/1k", ...MASKS];
 const JOURNAL = { preview: PREVIEW, archive: ["request headers args ttl=1d", ...MASKS] };
+// Тело без размера -- целиком: снимка тела на маршруте нет, модуль дочитывает
+// его после вердикта и отдаёт агенту вместе с записью.
 const JOURNAL_BODY = {
   preview: PREVIEW,
-  archive: ["request headers args body ttl=1d", "request reload body", ...MASKS],
+  archive: ["request headers args body ttl=1d", ...MASKS],
 };
 
 const BODY = "4m";
