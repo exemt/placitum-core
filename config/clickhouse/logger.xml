@@ -1,0 +1,12 @@
+<!--
+  Server log to the container console only; the level comes from CLICKHOUSE_LOG_LEVEL.
+  A double hyphen inside an XML comment stops the server from starting.
+-->
+<clickhouse>
+    <logger>
+        <level from_env="CLICKHOUSE_LOG_LEVEL"/>
+        <console>1</console>
+        <log remove="1"/>
+        <errorlog remove="1"/>
+    </logger>
+</clickhouse>

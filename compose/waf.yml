@@ -1,0 +1,522 @@
+# Placitum: infrastructure plus components built from sources.env. Run it through ../install.sh.
+
+name: placitum
+
+include:
+  # PLC_INFRA_PORTS in .env: none (default) or loopback.
+  - path:
+      - infra.yml
+      - ports/${PLC_INFRA_PORTS:-none}.yml
+
+x-build: &build
+  VERSION: ${PLC_VERSION:-dev}
+  REVISION: ${PLC_REVISION:-unknown}
+
+x-resources: &resources
+  cpus: "2.0"
+  mem_limit: 1g
+  restart: unless-stopped
+
+x-bus: &bus
+  NATS_URL: nats://nats:4222
+  WAF_NATS_URL: nats://nats:4222
+  REDIS_URL: redis://redis:6379
+  REDIS_INTERNAL_URL: redis://redis-internal:6379
+
+x-inspector: &inspector
+  <<: *resources
+  depends_on:
+    nats:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    redis-internal:
+      condition: service_healthy
+
+services:
+
+  # Protection node: nginx with the module and the agent; serves 503 on :8079 until the first generation.
+  edge:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_NGINX:?set it in sources.env}
+      dockerfile: managed/Dockerfile
+      args:
+        <<: *build
+        NGINX_VERSION: "${NGINX_VERSION:-1.28.0}"
+    hostname: ${PLC_NODE_ID:-edge-01}
+    environment:
+      <<: *bus
+      WAF_NODE_ID: ${PLC_NODE_ID:-edge-01}
+      WAF_AGENT_CONFIG: /etc/waf/agent.conf
+      WAF_NGINX_MANAGE: "on"
+      WAF_AGENT_LOG: info
+      WAF_NGINX_DEBUG: "off"
+    ports:
+      - "${PLC_HTTP_PORT:-80}:8080"
+      - "${PLC_HTTPS_PORT:-443}:8443"
+      # Panel behind the auth gate; loopback unless PLC_PANEL_BIND says otherwise.
+      - "${PLC_PANEL_BIND:-127.0.0.1}:${PLC_PANEL_PORT:-8081}:8081"
+    volumes:
+      - ../config/edge/agent.conf:/etc/waf/agent.conf:ro
+      - ../config/edge/node.conf:/etc/nginx/waf-node.conf:ro
+      - edge-data:/var/lib/waf/agent
+      - edge-store:/var/lib/waf/store
+    secrets:
+      - waf_node_key
+      - waf_s3_creds
+    # Request body buffers in memory; uid/gid match nginx in the image.
+    tmpfs:
+      - /var/cache/nginx/client_temp:rw,size=64m,mode=0700,uid=101,gid=101
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-internal:
+        condition: service_healthy
+      minio-mc:
+        condition: service_healthy
+
+  controller:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_CONTROLLER:?set it in sources.env}
+      args:
+        <<: *build
+        VITE_CONTOUR_FINGERPRINT: ${VITE_CONTOUR_FINGERPRINT:-}
+    ports:
+      # API without login: loopback only.
+      - "127.0.0.1:${PLC_CONTROLLER_PORT:-8080}:8080"
+    environment:
+      CONTROLLER_PORT: "8080"
+      CONTROLLER_NAME: controller
+      CONTROLLER_LOG: info
+      CONTROLLER_DATABASE_URL: postgres://${POSTGRES_USER:-waf}:${POSTGRES_PASSWORD:-waf}@postgres:5432/${POSTGRES_DB:-waf}
+      CONTROLLER_NATS_URL: nats://nats:4222
+      CONTROLLER_REDIS_URL: redis://redis:6379
+      CONTROLLER_REDIS_INTERNAL_URL: redis://redis-internal:6379
+      CONTROLLER_SEARCH_URL: http://search:8091
+      CONTROLLER_GEO_URL: http://geo:8092
+      CONTROLLER_CRYPTO_SERVICE_URL: http://crypto:8093
+      CONTROLLER_CRYPTO_PUBLIC_KEY: /run/secrets/waf_node_pub
+      CONTROLLER_COMPILE_DIR: /app/data/compile
+      CONTROLLER_FLEET_DEMO: "0"
+    secrets:
+      - waf_node_pub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis-internal:
+        condition: service_healthy
+      crypto:
+        condition: service_started
+      search:
+        condition: service_started
+      geo:
+        condition: service_started
+
+  logger:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_LOGGER:?set it in sources.env}
+      args: *build
+    image: placitum/logger
+    environment:
+      <<: *bus
+      WAF_LOGGER_LOG: info
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
+      # ClickHouse dictionaries read country and ASN data from the controller database.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-waf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waf}
+      POSTGRES_DB: ${POSTGRES_DB:-waf}
+    depends_on:
+      nats-box:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  # Audit search for the panel; same image as logger.
+  search:
+    <<: *resources
+    image: placitum/logger
+    command: ["waf-search"]
+    environment:
+      <<: *bus
+      SEARCH_PORT: "8091"
+      WAF_SEARCH_LOG: info
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-waf}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-waf}
+      WAF_STORE_S3_ENDPOINT: http://minio:9000
+      WAF_STORE_S3_REGION: us-east-1
+      WAF_STORE_S3_CREDENTIALS_FILE: /run/secrets/waf_s3_creds
+      WAF_STORE_BUCKET_HEADERS: waf-headers
+      WAF_STORE_BUCKET_ARGS: waf-args
+      WAF_STORE_BUCKET_BODY: waf-bodies
+    secrets:
+      - waf_s3_creds
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  crypto:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_CRYPTO:?set it in sources.env}
+      args: *build
+    environment:
+      <<: *bus
+      WAF_CRYPTO_HTTP: ":8093"
+      WAF_CRYPTO_LOG: info
+      WAF_NODE_KEY: /run/secrets/waf_node_key
+      WAF_CONTROLLER_URL: http://controller:8080
+    secrets:
+      - waf_node_key
+
+  geo:
+    <<: *resources
+    mem_limit: 4g
+    build:
+      context: ${PLC_SRC_GEO:?set it in sources.env}
+      args: *build
+    environment:
+      <<: *bus
+      WAF_GEO_CONTROLLER_URL: http://controller:8080
+      WAF_GEO_LOG: info
+      GOMEMLIMIT: 3GiB
+    volumes:
+      - ${PLC_GEO_DATA:-../config/geo}:/app/data:ro
+      - geo-copies:/var/lib/waf/geo
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  keeper:
+    <<: *resources
+    cpus: "4.0"
+    mem_limit: 2g
+    build:
+      context: ${PLC_SRC_KEEPER:?set it in sources.env}
+      args: *build
+    environment:
+      <<: *bus
+      WAF_KEEPER_LOG: info
+      WAF_KEEPER_DATABASE_URL: postgres://${POSTGRES_USER:-waf}:${POSTGRES_PASSWORD:-waf}@postgres:5432/${POSTGRES_DB:-waf}
+      GOMEMLIMIT: 1536MiB
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis-internal:
+        condition: service_healthy
+
+  inspector-ip:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_IP:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    environment:
+      <<: *bus
+      WAF_IP_SUBJECT: waf.req.ip
+      WAF_IP_NAME: ip
+      WAF_IP_LOG: info
+      WAF_IP_GEO_ADDR: geo:50051
+
+  inspector-modsec:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_MODSEC:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    environment:
+      <<: *bus
+      WAF_MODSEC_SUBJECT: waf.req.modsec
+      WAF_MODSEC_NAME: modsec
+      WAF_MODSEC_LOG: info
+      WAF_MODSEC_GEO_ADDR: geo:50051
+
+  inspector-json:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_JSON:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    environment:
+      <<: *bus
+      WAF_JSON_SUBJECT: waf.req.json
+      WAF_JSON_NAME: json
+      WAF_JSON_LOG: info
+      WAF_JSON_GEO_ADDR: geo:50051
+
+  inspector-counter:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_COUNTER:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    environment:
+      <<: *bus
+      WAF_COUNTER_SUBJECT: waf.req.counter
+      WAF_COUNTER_NAME: counter
+      WAF_COUNTER_LOG: info
+      WAF_COUNTER_GEO_ADDR: geo:50051
+
+  inspector-action:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_ACTION:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    environment:
+      <<: *bus
+      WAF_ACTION_SUBJECT: waf.req.action
+      WAF_ACTION_NAME: action
+      WAF_ACTION_LOG: info
+      WAF_ACTION_GEO_ADDR: geo:50051
+
+  inspector-rewrite:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_REWRITE:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    environment:
+      <<: *bus
+      WAF_REWRITE_SUBJECT: waf.req.rewrite
+      WAF_REWRITE_NAME: rewrite
+      WAF_REWRITE_LOG: info
+
+  inspector-auth:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_AUTH:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    image: placitum/auth
+    environment:
+      <<: *bus
+      WAF_AUTH_SUBJECT: waf.req.auth
+      WAF_AUTH_NAME: auth
+      WAF_AUTH_LOG: info
+      WAF_AUTH_KEY_FILE: /run/secrets/waf_auth_hmac
+      WAF_AUTH_HTTP_URL: http://auth-http:8080
+      WAF_AUTH_GEO_ADDR: geo:50051
+    secrets:
+      - waf_auth_hmac
+
+  auth-http:
+    <<: *resources
+    image: placitum/auth
+    command: ["auth-http"]
+    environment:
+      <<: *bus
+      WAF_AUTH_NAME: auth
+      WAF_AUTH_LOG: info
+      WAF_AUTH_LISTEN: ":8080"
+      WAF_AUTH_KEY_FILE: /run/secrets/waf_auth_hmac
+      WAF_AUTH_APP_KEY_FILE: /run/secrets/waf_auth_app
+      WAF_AUTH_COOKIE_SECURE: ${PLC_COOKIE_SECURE:-off}
+      WAF_AUTH_CONTROLLER: http://controller:8080
+      WAF_AUTH_SCOPE: name:default
+      WAF_AUTH_CONTOUR_KEY: /run/secrets/waf_node_key
+    secrets:
+      - waf_auth_hmac
+      - waf_auth_app
+      - waf_node_key
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      redis-internal:
+        condition: service_healthy
+      controller:
+        condition: service_started
+
+  inspector-captcha:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_CAPTCHA:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    image: placitum/captcha
+    environment:
+      <<: *bus
+      WAF_CAPTCHA_SUBJECT: waf.req.captcha
+      WAF_CAPTCHA_NAME: captcha
+      WAF_CAPTCHA_LOG: info
+      WAF_CAPTCHA_KEY_FILE: /run/secrets/waf_captcha_hmac
+      WAF_CAPTCHA_HTTP_URL: http://captcha-http:8080
+      WAF_CAPTCHA_GEO_ADDR: geo:50051
+    secrets:
+      - waf_captcha_hmac
+
+  captcha-http:
+    <<: *resources
+    image: placitum/captcha
+    command: ["captcha-http"]
+    environment:
+      <<: *bus
+      WAF_CAPTCHA_NAME: captcha
+      WAF_CAPTCHA_LOG: info
+      WAF_CAPTCHA_LISTEN: ":8080"
+      WAF_CAPTCHA_KEY_FILE: /run/secrets/waf_captcha_hmac
+      WAF_CAPTCHA_COOKIE_SECURE: ${PLC_COOKIE_SECURE:-off}
+      WAF_CAPTCHA_CONTROLLER: http://controller:8080
+      WAF_CAPTCHA_SCOPE: name:default
+      WAF_CAPTCHA_CONTOUR_KEY: /run/secrets/waf_node_key
+    secrets:
+      - waf_captcha_hmac
+      - waf_node_key
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/waf/captcha/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      redis-internal:
+        condition: service_healthy
+      controller:
+        condition: service_started
+
+  inspector-cookie:
+    <<: *inspector
+    build:
+      context: ${PLC_SRC_COOKIE:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    image: placitum/cookie
+    environment:
+      <<: *bus
+      WAF_COOKIE_SUBJECT: waf.req.cookie
+      WAF_COOKIE_NAME: cookie
+      WAF_COOKIE_LOG: info
+      WAF_COOKIE_SECRET_FILE: /run/secrets/waf_cookie_hmac
+      WAF_COOKIE_GEO_ADDR: geo:50051
+    secrets:
+      - waf_cookie_hmac
+
+  # Heavy, downloads model weights on first start: docker compose --profile vlai up -d
+  inspector-vlai:
+    profiles: ["vlai"]
+    cpus: "2.0"
+    mem_limit: 4g
+    restart: unless-stopped
+    build:
+      context: ${PLC_SRC_VLAI:?set it in sources.env}
+      dockerfile: deploy/Dockerfile
+      args: *build
+    image: placitum/vlai
+    environment:
+      <<: *bus
+      WAF_VLAI_SUBJECT: waf.req.vlai
+      WAF_VLAI_NAME: vlai
+      WAF_VLAI_LOG: info
+      VLAI_DEVICE: cpu
+      WAF_VLAI_GEO_URL: http://geo:8092
+    volumes:
+      - vlai-checkpoint:/var/lib/waf/vlai
+    depends_on:
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redis-agent:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_REDIS_AGENT:?set it in sources.env}
+      args: *build
+    hostname: redis-agent
+    environment:
+      <<: *bus
+      WAF_REDIS_NAME: redis
+      WAF_REDIS_AGENT_LOG: info
+    volumes:
+      - redis-agent-data:/var/lib/waf/agent
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  redis-internal-agent:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_REDIS_AGENT:?set it in sources.env}
+      args: *build
+    hostname: redis-internal-agent
+    environment:
+      <<: *bus
+      REDIS_URL: redis://redis-internal:6379
+      WAF_REDIS_NAME: redis-internal
+      WAF_REDIS_AGENT_LOG: info
+    volumes:
+      - redis-internal-agent-data:/var/lib/waf/agent
+    depends_on:
+      redis-internal:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  s3-agent:
+    <<: *resources
+    build:
+      context: ${PLC_SRC_S3_AGENT:?set it in sources.env}
+      args: *build
+    hostname: s3-agent
+    environment:
+      <<: *bus
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-waf}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-wafwafwaf}
+      S3_BUCKET: waf-bodies
+      S3_ENSURE_BUCKETS: waf-bodies,waf-headers,waf-args
+      S3_REGION: us-east-1
+      WAF_S3_NAME: s3
+      WAF_S3_AGENT_LOG: info
+    volumes:
+      - s3-agent-data:/var/lib/waf/agent
+    depends_on:
+      minio:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+volumes:
+  geo-copies:
+  edge-data:
+  edge-store:
+  vlai-checkpoint:
+  redis-agent-data:
+  redis-internal-agent-data:
+  s3-agent-data:
+
+# Created by ../install.sh (bootstrap/secrets.sh); not in git.
+secrets:
+  waf_node_key:
+    file: ../secrets/contour.key
+  waf_node_pub:
+    file: ../secrets/contour.pub
+  waf_s3_creds:
+    file: ../secrets/s3.creds
+  waf_auth_hmac:
+    file: ../secrets/auth.hmac
+  waf_auth_app:
+    file: ../secrets/auth-app.hmac
+  waf_captcha_hmac:
+    file: ../secrets/captcha.hmac
+  waf_cookie_hmac:
+    file: ../secrets/cookie.hmac
