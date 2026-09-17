@@ -1050,6 +1050,27 @@ migrate() {
     quietly "PostgreSQL schema" compose waf.yml run --rm --no-deps controller node src/migrate.ts
 }
 
+# container_hosts: hostnames of the containers of the installation, one per line.
+container_hosts() {
+    docker ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-placitum}" |
+        xargs -r docker inspect -f '{{.Config.Hostname}}' 2>/dev/null | sort -u
+}
+
+gone=""
+
+# forget_gone: members of what this run removed leave the controller fleet now instead of staying
+# silent for a minute. A failure costs only that minute.
+forget_gone() {
+    [ -n "$gone" ] || return 0
+
+    if left=$(compose waf.yml exec -T -e "FORGET=$gone" controller \
+        node --input-type=module -e "$(cat "$here/bootstrap/forget.mjs")" 2>> "$log_file" < /dev/null); then
+        [ "${left:-0}" -eq 0 ] || printf '  removed from the fleet: %s\n' "$(printf '%s' "$gone" | tr '\n' ' ' | sed 's/ *$//')"
+    else
+        warn "the controller did not forget the removed members; they leave the panel within a minute"
+    fi
+}
+
 # balancer_host start|stop: haproxy and its agent as services of this machine, when it has them.
 balancer_host() {
     host_balancer || return 0
@@ -1059,6 +1080,9 @@ balancer_host() {
             if systemctl is-enabled --quiet placitum-haproxy 2>/dev/null ||
                 systemctl is-active --quiet placitum-haproxy 2>/dev/null; then
                 quietly "haproxy on this machine off" systemctl disable --now placitum-haproxy-agent placitum-haproxy
+                # The agent reports under the name of this machine.
+                gone="$gone
+$(hostname)"
             fi
             ;;
         start)
@@ -1074,6 +1098,8 @@ balancer_host() {
 
 components() {
     say "components"
+
+    hosts_before=$(container_hosts)
 
     # What the answers no longer run: vlai, haproxy for a single node, nodes beyond PLC_NODES.
     if [ "${PLC_COPIES_VLAI:-0}" -eq 0 ]; then
@@ -1113,6 +1139,17 @@ components() {
     esac
 
     quietly "start and health check" compose waf.yml up -d --wait --no-build
+
+    # Removed nodes, copies and recreated containers under new hostnames: nothing reports for them any
+    # more. A hostname that is back after the run, such as a recreated node, stays.
+    kept=$(mktemp)
+    container_hosts > "$kept"
+    gone="$gone
+$(printf '%s\n' "$hosts_before" | grep -vxF -f "$kept" || true)"
+    rm -f "$kept"
+    gone=$(printf '%s\n' "$gone" | awk 'NF && !seen[$0]++')
+
+    forget_gone
 }
 
 panel() {

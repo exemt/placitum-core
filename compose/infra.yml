@@ -109,6 +109,10 @@ services:
     environment:
       REDIS_MB: ${PLC_REDIS_INTERNAL_MB:-512}
     command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --maxmemory $$((REDIS_MB * 4 / 5))mb --maxmemory-policy noeviction"]
+    # Configuration blobs the nodes and inspectors fetch, sessions and inspector state: a recreated
+    # container keeps them, so a node applies its generation without a new publish.
+    volumes:
+      - redis-internal-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -159,3 +163,4 @@ volumes:
   postgres-data:
   clickhouse-data:
   minio-data:
+  redis-internal-data:

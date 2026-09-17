@@ -15,7 +15,8 @@ RuntimeDirectoryPreserve=yes
 StateDirectory=placitum/haproxy
 # Until the first configuration from the controller haproxy runs on a stub without traffic ports.
 ExecStartPre=/bin/sh -c 'test -s /var/lib/placitum/haproxy/haproxy.cfg || cp /opt/placitum/image/balancer/haproxy-bootstrap.cfg /var/lib/placitum/haproxy/haproxy.cfg'
-ExecStart=/usr/sbin/haproxy -Ws -f /var/lib/placitum/haproxy/haproxy.cfg -p /run/placitum-haproxy/haproxy.pid
+# -S: the master CLI; the agent reloads through it and learns whether the new configuration loaded.
+ExecStart=/usr/sbin/haproxy -Ws -S /run/placitum-haproxy/master.sock,mode,600 -f /var/lib/placitum/haproxy/haproxy.cfg -p /run/placitum-haproxy/haproxy.pid
 ExecReload=/bin/kill -USR2 $MAINPID
 Restart=always
 RestartSec=2s

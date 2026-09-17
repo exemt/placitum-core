@@ -16,6 +16,7 @@ Environment=WAF_DATA_DIR=/var/lib/placitum/haproxy-agent
 Environment=WAF_HAPROXY_BIN=/usr/sbin/haproxy
 Environment=WAF_HAPROXY_CFG=/var/lib/placitum/haproxy/haproxy.cfg
 Environment=WAF_HAPROXY_PIDFILE=/run/placitum-haproxy/haproxy.pid
+Environment=WAF_HAPROXY_MASTER_SOCK=/run/placitum-haproxy/master.sock
 ExecStart=/usr/local/bin/waf-haproxy-agent
 # NATS runs in a container and comes up after this service on boot.
 Restart=always

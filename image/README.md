@@ -19,6 +19,10 @@ Docker there, loads the images and cleans the machine up. The result is
 `image/work/placitum-<revision>.qcow2`, about 2 GB. Branches from `sources.env` are resolved to
 commits, and the image lists them in `/opt/placitum/image/MANIFEST`.
 
+The build loads every core of the machine. On a small machine that overheats, limit it:
+`BUILD_PARALLEL=2 VM_CPUS=2 sh image/build.sh` builds two component images at a time and gives the
+build machine two cores.
+
 The build machine needs Docker, `qemu-system-x86_64` with access to `/dev/kvm` (the `kvm` group),
 `qemu-img`, `cloud-localds` from cloud-image-utils, `ssh`, `curl` and `python3`, and internet access:
 Debian and Docker packages are installed from their repositories.

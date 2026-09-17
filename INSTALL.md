@@ -75,9 +75,10 @@ PLC_NODE_ID=edge-02 PLC_PANEL_BIND=10.0.0.5 PLC_PANEL_PASSWORD=… ./install.sh 
 
 The same questions with the current values in brackets. The installer shows the plan and what
 changes, and after confirmation runs the installation again: containers whose settings changed are
-recreated, nodes and copies beyond the new numbers are removed, and the configuration is published
-again. Only images that the new answers need and the machine lacks are built, such as haproxy for
-the second node. Data stays.
+recreated, nodes and copies beyond the new numbers are removed and leave the panel at once, and the
+configuration is published again. Only images that the new answers need and the machine lacks are
+built, such as haproxy for the second node. Data stays: the internal Redis keeps the configuration
+the nodes fetch on a volume, so a recreated node applies it without a new publish.
 
 A new installation network takes every container out of the old one and starts it in the new one;
 data stays. Containers of other projects attached to the network, such as an application the routes

@@ -6,6 +6,9 @@
 #     sh image/build.sh                    image/work/placitum-<revision>.qcow2
 #     sh image/build.sh --sources <file>   other component sources
 #
+# BUILD_PARALLEL=<n> builds at most n component images at a time: slower, but a small machine
+# does not overheat. VM_CPUS sets the cores of the build machine (4).
+#
 # The host needs Docker, qemu-system-x86_64 with KVM, qemu-img, cloud-localds,
 # ssh and python3. Branches in the sources are resolved to commits, and the image
 # lists them in /opt/placitum/image/MANIFEST.
@@ -20,7 +23,7 @@ sources="$core/sources.env"
 while [ $# -gt 0 ]; do
     case "$1" in
         --sources) sources=$2; shift 2 ;;
-        -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help|help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -88,10 +91,16 @@ done
 say "images"
 
 compose() {
-    docker compose -p "$project" --ansi never --progress plain \
+    docker compose -p "$project" --ansi never --progress plain ${BUILD_PARALLEL:+--parallel "$BUILD_PARALLEL"} \
         --env-file "$core/.env.example" --env-file "$lock" \
         -f "$core/compose/waf.yml" "$@"
 }
+
+# Bake builds every target at once; the plain builder keeps to --parallel.
+if [ -n "${BUILD_PARALLEL:-}" ]; then
+    COMPOSE_BAKE=false
+    export COMPOSE_BAKE
+fi
 
 # Built images get names of their own, so the build does not retag images this
 # host already uses. On the machine they get their installation names back.
