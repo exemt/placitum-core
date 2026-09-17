@@ -309,6 +309,9 @@ prepare_env() {
 
     [ "$cmd" != reconfigure ] || setup=reconfigure
 
+    # The answers before this run: a refused change puts them back.
+    cp -p "$env_file" "$env_file.before"
+
     # shellcheck disable=SC1090
     . "$env_file"
     before=$(snapshot)
@@ -691,10 +694,17 @@ components() {
 
     # A running controller checks the catalog first: an inspector that routes still call stays.
     if [ -n "$(compose waf.yml ps --status running -q controller 2>/dev/null)" ]; then
-        if ! result=$(layout_run catalog 2>> "$log_file"); then
-            log_tail
-            die "inspectors not changed, log: $log_file"
+        err=$(mktemp)
+
+        if ! result=$(layout_run catalog 2> "$err"); then
+            cat "$err" >> "$log_file"
+            why=$(sed -n 's/^Error: //p' "$err" | head -n 1)
+            rm -f "$err"
+            cat "$env_file.before" > "$env_file"
+            die "${why:-the inspector catalog refused the change}; the answers stay as they were"
         fi
+
+        rm -f "$err"
         [ -z "$result" ] || printf '%s\n' "$result" | sed 's/^/  /'
     fi
 
@@ -885,6 +895,7 @@ install_all() {
     layout
     publish
     say "done"
+    rm -f "$env_file.before"
     health
     summary
 }
