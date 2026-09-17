@@ -174,7 +174,15 @@ ssh -L 8080:127.0.0.1:8080 <host>
 ```
 
 Never proxy this port: a host nginx or any reverse proxy in front of `127.0.0.1:8080` exposes the
-API without login again. If you need a proxy, put it in front of the panel port (`PLC_PANEL_PORT`).
+API without login again. If you need a proxy, put it in front of the panel port (`PLC_PANEL_PORT`)
+and make it pass the browser's `Host` (`proxy_set_header Host $host;` in nginx): the controller
+refuses a change whose `Origin` names another host than `Host` does, and answers
+`403 cross_origin`.
+
+A panel session lives 8 hours, is renewed silently and ends for good 24 hours after sign-in
+(`session.max_ttl_s` of the `panel` source). A user removed from `panel_users`, or one whose
+password was changed, is no longer renewed: the session ends when the current token does, 8 hours
+(`session.ttl_s`) after that at the latest.
 
 Do not touch these without emergency access at hand: the login gate on `/` and
 `/agent_health_socket` of the `panel` server, the `panel` source and profile, the last user in

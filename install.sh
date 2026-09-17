@@ -301,8 +301,12 @@ panel() {
     printf '  login gate, admin and publish to the node ... '
     printf '\n== %s panel\n' "$(date '+%F %T')" >> "$log_file"
 
+    # shellcheck disable=SC1090
+    if [ -f "$env_file" ]; then . "$env_file"; fi
+
     if ! result=$(printf '%s' "$panel_pass" |
-        compose waf.yml exec -T -e "PANEL_ADMIN=${1:-ensure}" controller \
+        compose waf.yml exec -T -e "PANEL_ADMIN=${1:-ensure}" \
+            -e "PANEL_COOKIE_SECURE=${PLC_COOKIE_SECURE:-off}" controller \
             node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")" 2>> "$log_file"); then
         printf 'failed\n'
         log_tail

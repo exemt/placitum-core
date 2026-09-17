@@ -34,6 +34,12 @@ const JOURNAL_BODY = {
 
 const BODY = "4m";
 
+// The node sets the login ticket cookie with the route defaults; Secure has to follow what the
+// form does (PLC_COOKIE_SECURE), or over plain HTTP the browser drops the ticket of the redirect.
+const COOKIE_SECURE = ["on", "1", "yes", "true"].includes(
+  (process.env.PANEL_COOKIE_SECURE ?? "off").trim().toLowerCase(),
+);
+
 class Fatal extends Error {}
 
 const say = (line) => process.stderr.write(`${line}\n`);
@@ -435,7 +441,8 @@ await ensure(
       },
       provider: "local",
       providers: { local: { users: USERS } },
-      session: { ttl_s: 8 * 3600, renew_after_s: 3600 },
+      // Renewal is silent, so without max_ttl_s a stolen cookie would never have to sign in again.
+      session: { ttl_s: 8 * 3600, renew_after_s: 3600, max_ttl_s: 24 * 3600 },
     },
   },
 );
@@ -502,6 +509,7 @@ const gated = {
   requestInspectors: [{ name: GATE, wave: 0 }],
   responseInspectors: "none",
   redirectAllow: [LOGIN],
+  cookieDefaults: { secure: COOKIE_SECURE, httpOnly: true, sameSite: "Lax" },
   // No verdict means deny: the bus default is pass, and a NATS outage would open the panel.
   exception: ["request deny"],
 };

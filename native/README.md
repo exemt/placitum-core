@@ -87,8 +87,8 @@ paths move to the process directories. Addresses, ports and credentials are not 
 | Port | What | Address |
 | --- | --- | --- |
 | 80, 8081, 8079 | nginx: traffic, panel, placeholder until the first generation | traffic and panel ports come from the answers |
-| 8080 | controller, API without login | **all addresses**: not configurable |
-| 8091 | search | **all addresses**: only the port is configurable |
+| 8080 | controller, API without login | 127.0.0.1 (`CONTROLLER_HOST`) |
+| 8091 | search | 127.0.0.1 (`SEARCH_HOST`) |
 | 8085, 8086 | login and captcha forms | 127.0.0.1 |
 | 8092, 50051, 8093, 8094 | geo, crypto, keeper | 127.0.0.1 |
 | 4222, 8222 | NATS | 127.0.0.1 |
@@ -96,8 +96,8 @@ paths move to the process directories. Addresses, ports and credentials are not 
 | 5432, 8123, 9000 | PostgreSQL, ClickHouse | localhost |
 | 9100, 9101 | MinIO: API and console | 127.0.0.1 |
 
-The controller and search listen on all addresses and cannot be restricted yet: put a firewall in
-front of them.
+The controller and search have no login, so the installer binds them to 127.0.0.1
+(`CONTROLLER_HOST`, `SEARCH_HOST` in their environment files).
 
 ## Differences from the Docker installation
 
@@ -119,7 +119,6 @@ front of them.
 ## Not there yet
 
 - A proxy question: HAProxy in front of nginx comes to the installer together with its support.
-- A firewall for the controller and search.
 - vlai.
 - Upgrades: running `install.sh` again installs new packages but does not restart running processes.
 - TLS on the node and the panel.
