@@ -272,23 +272,27 @@ net_overlap() {
 # net_moves: Docker has the installation network with other addresses than the answers give it.
 net_moves() {
     have=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}|{{.IPRange}}|{{.Gateway}} {{end}}' \
-        "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null | awk '{ print $1 }')
+        "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null | tr ' ' '\n' | grep '^[0-9]*\.' | head -n 1)
 
     [ -n "$have" ] && [ "$have" != "$PLC_SUBNET|$(net "$PLC_SUBNET" range)|$(net "$PLC_SUBNET" gateway)" ]
 }
 
-# net_strangers: containers in the installation network that compose did not create for it. Labels
-# of an image do not count: compose writes its config hash only on containers it creates.
-net_strangers() {
-    docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null |
+# net_guests: containers of other projects in the installation network, "name alias,alias" per line.
+# Labels of an image do not count: compose writes its config hash only on containers it creates.
+net_guests() {
+    network="${COMPOSE_PROJECT_NAME:-placitum}_default"
+
+    docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$network" 2>/dev/null |
         tr ' ' '\n' | while read -r name; do
             [ -n "$name" ] || continue
             mark=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}' "$name" 2>/dev/null || true)
 
             case "$mark" in
-                "${COMPOSE_PROJECT_NAME:-placitum}|"?*) ;;
-                *) printf '%s ' "$name" ;;
+                "${COMPOSE_PROJECT_NAME:-placitum}|"?*) continue ;;
             esac
+
+            aliases=$(docker inspect -f "{{with index .NetworkSettings.Networks \"$network\"}}{{join .Aliases \",\"}}{{end}}" "$name" 2>/dev/null || true)
+            printf '%s %s\n' "$name" "$aliases"
         done
 }
 
@@ -453,13 +457,6 @@ check_network() {
 
     [ "$others" -le "$capacity" ] ||
         die "network $PLC_SUBNET has room for $capacity containers besides nodes and NATS, the answers run $others: choose a larger network; nothing changed"
-
-    # Docker rebuilds the network only when nothing is attached to it.
-    if net_moves; then
-        strangers=$(net_strangers)
-        [ -z "$strangers" ] ||
-            die "containers of other projects are attached to the installation network: ${strangers% }; disconnect them (docker network disconnect) or keep the network; nothing changed"
-    fi
 }
 
 # A machine that does not build images needs an image for everything the answers run.
@@ -924,7 +921,11 @@ plan() {
 
     printf '  panel        %s:%s\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
     printf '  network      %s\n' "$PLC_SUBNET"
-    ! net_moves || printf '               the network is rebuilt: every container restarts, data stays\n'
+    if net_moves; then
+        printf '               the network is rebuilt: every container restarts, data stays\n'
+        guests=$(net_guests | awk '{ printf "%s%s", sep, $1; sep = ", " }')
+        [ -z "$guests" ] || printf '               containers of other projects move along: %s\n' "$guests"
+    fi
 
     on=""
     off=""
@@ -1004,13 +1005,39 @@ infra_services="nats nats-box postgres clickhouse redis redis-internal minio min
 infra() {
     say "infrastructure"
 
-    # A rebuilt network takes every container out of the old one first; volumes stay.
+    network="${COMPOSE_PROJECT_NAME:-placitum}_default"
+    guests=""
+
+    # A rebuilt network takes every container out of the old one first; volumes stay. Docker removes a
+    # network only when nothing is attached, so containers of other projects step out too.
     if net_moves; then
+        guests=$(net_guests)
+
+        printf '%s\n' "$guests" | while read -r name _; do
+            [ -z "$name" ] || docker network disconnect -f "$network" "$name" >> "$log_file" 2>&1
+        done
+
         quietly "containers out of the old network" compose waf.yml down --remove-orphans
     fi
 
     # shellcheck disable=SC2086
     quietly "postgres, clickhouse, redis, nats, minio" compose waf.yml up -d --wait $infra_services
+
+    # Containers of other projects come back under their aliases before the nodes look for them.
+    printf '%s\n' "$guests" | while read -r name aliases; do
+        [ -n "$name" ] || continue
+        set --
+
+        for alias in $(printf '%s' "$aliases" | tr ',' ' '); do
+            set -- "$@" --alias "$alias"
+        done
+
+        if docker network connect "$@" "$network" "$name" >> "$log_file" 2>&1; then
+            printf '  %s is back in the network\n' "$name"
+        else
+            warn "$name did not join the new network: docker network connect $network $name"
+        fi
+    done
 }
 
 migrate() {

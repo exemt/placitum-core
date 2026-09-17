@@ -80,8 +80,8 @@ again. Only images that the new answers need and the machine lacks are built, su
 the second node. Data stays.
 
 A new installation network takes every container out of the old one and starts it in the new one;
-data stays. Docker rebuilds a network only when nothing else is attached to it, so a container of
-another project in it stops the change before anything happens.
+data stays. Containers of other projects attached to the network, such as an application the routes
+send traffic to, move along under the same aliases.
 
 An inspector that routes or declarations still call is not turned off: the installer names the place
 and stops before anything changes. Without confirmation, after a refusal or an interrupt, `.env`
