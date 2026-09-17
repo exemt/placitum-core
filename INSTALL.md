@@ -11,7 +11,7 @@ A quick start and the repository layout are in [README.md](README.md).
 | --- | --- |
 | Docker | 24 or newer, with BuildKit |
 | Docker Compose | 2.20 or newer: the installation relies on `include` |
-| CPU and memory | 8 cores and 16 GB without the text classifier; 4 GB more with `vlai` |
+| CPU and memory | at least 2 cores and 4 GB, see [the measurements](image/README.md#sizing); 8 cores and 16 GB for heavy traffic; 4 GB more with `vlai` |
 | Disk | 20 GB for images, build caches and data; the body archive grows over time |
 | Network | during the build: GitHub, Docker Hub, quay.io, proxy.golang.org, npm, PyPI |
 
@@ -34,16 +34,19 @@ cd placitum-core
 `install` runs in steps and stops at the first failure:
 
 1. **Checks**: Docker, Compose, `openssl`, disk space, the sources file.
-2. **Environment**: `.env` from `.env.example` if it does not exist. Check ports and credentials
-   before the next step: changing them later means recreating containers.
+2. **Settings**: on the first run `.env` is created from `.env.example` with new random passwords
+   for PostgreSQL, ClickHouse and MinIO, and the installer asks on a terminal: node name, traffic
+   ports, panel address and port, Redis memory. Enter takes the value in brackets. CPU caps are
+   lowered to the number of cores.
 3. **Secrets**: the installation key, archive credentials and four signing keys. The key
-   fingerprint is written to `.env` and baked into the panel at build time.
+   fingerprint goes to `secrets/contour-pin.json`; the controller container mounts it read-only,
+   and the panel checks the key from the API against it.
 4. **Infrastructure**: NATS, PostgreSQL, ClickHouse, both Redis instances and MinIO; JetStream
    streams and bucket rules are created on start.
 5. **Schema**: on an empty database the controller installs the schema and the shipped data.
 6. **Components**: images are built from `sources.env` and started.
 7. **Panel**: the `panel` server on the node behind the `auth` login gate, and the `admin` user.
-   The password is asked at the very start, before the build (see [Panel](#panel)).
+   The password is asked right after the settings, before the build (see [Panel](#panel)).
 8. **Delivery**: all configuration channels are published to the processes, and the step waits for
    their reports. Otherwise a fresh installation runs on image defaults and the panel shows a
    mismatch.
@@ -51,6 +54,23 @@ cd placitum-core
 
 Each step leaves one line with its result and time on screen. The full build and compose output
 goes to `install.log` next to `install.sh`; on failure the installer shows its tail.
+
+Without a terminal, or with `--defaults`, nothing is asked: a setting comes from the environment
+if it is set there, otherwise from the default.
+
+```sh
+PLC_NODE_ID=edge-02 PLC_PANEL_BIND=10.0.0.5 PLC_PANEL_PASSWORD=… ./install.sh install --defaults
+```
+
+### Changing the settings
+
+```sh
+./install.sh reconfigure
+```
+
+The same questions with the current values in brackets. Then the installation runs again without
+the build: containers whose settings changed are recreated, and the configuration is published
+again. Infrastructure passwords are not asked: they are set when the databases are created.
 
 ## Configuration
 
@@ -65,9 +85,10 @@ goes to `install.log` next to `install.sh`; on failure the installer shows its t
 | `PLC_CONTROLLER_PORT` | `8080` | controller API without login, on `127.0.0.1` only |
 | `PLC_NODE_ID` | `edge-01` | node name in the panel, heartbeat and audit |
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
-| `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | `waf` / `waf` / `wafwafwaf` | infrastructure credentials; for external databases also change the addresses in `compose/waf.yml` |
+| `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
+| `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the exchange Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
+| `PLC_CPUS`, `PLC_CPUS_NATS`, `PLC_CPUS_KEEPER` | `2`, `6`, `4` | CPU cap per service, for NATS and for keeper; the installer lowers them to the number of cores |
 | `NGINX_VERSION` | `1.28.0` | nginx version for the module and the base image; change both together |
-| `VITE_CONTOUR_FINGERPRINT` | set by `install.sh` | key fingerprint pinned in the panel |
 
 ### `sources.env`
 
@@ -143,7 +164,7 @@ sets it up through the API from inside the controller container. Running `./inst
 creates only what is missing and keeps operator changes; `admin` is created only when the user list
 is empty. The same run repairs the panel if its server, location or pool was deleted.
 
-The `admin` password is asked at the very start, before the build, twice and without echo. It is
+The `admin` password is asked right after the settings, before the build, twice and without echo. It is
 not stored anywhere: only its bcrypt hash goes to the user list. Press Enter on the first
 installation and the panel step generates a password and shows it once; on later runs the password
 stays the same. Without a terminal the password comes from `PLC_PANEL_PASSWORD` in the environment.
@@ -211,11 +232,10 @@ volume. There is no single upgrade command yet.
 
 ## Pitfalls
 
-- **Ports 80 and 443 are taken** by another service: the installation fails at the node. Change
-  `PLC_HTTP_PORT` and `PLC_HTTPS_PORT` before `install`.
+- **Ports 80 and 443 are taken** by another service: the installation fails at the node. Give other
+  ports when the installer asks, or later with `./install.sh reconfigure`.
 - **The node name lives in two places**: `PLC_NODE_ID` in `.env` and `waf_node_id` in
   `config/edge/node.conf`. `install.sh` keeps them in sync; if you edit by hand, edit both.
-- **Changed the installation key? Rebuild the controller**: the fingerprint is baked into the panel.
 - **Do not change `COMPOSE_PROJECT_NAME` on a running installation**: a new name means a new
   project, and old containers and volumes stay under the old one.
 - **Windows host (Docker Desktop)**: the bake builder does not understand git source URLs on Windows

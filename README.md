@@ -7,14 +7,16 @@ This is where Placitum, a firewall for web applications and APIs, is installed f
 The repository has everything needed to install it on your server: the `install.sh` script, compose
 files, infrastructure configs and initial setup. The components themselves (the nginx node, the
 controller with its panel, the inspectors) live in separate repositories. The installer downloads
-their sources and builds the images right on your machine; there are no prebuilt images yet.
+their sources and builds the images right on your machine. A ready virtual machine with built images
+is described in [image/README.md](image/README.md).
 
 Detailed instructions are in [INSTALL.md](INSTALL.md).
 
 ## Requirements
 
 - Linux, Docker 24+ and Docker Compose 2.20+
-- 8 cores and 16 GB of RAM, 4 GB more with the `vlai` text classifier
+- at least 2 cores and 4 GB of RAM ([what that holds](image/README.md#sizing)); 8 cores and 16 GB
+  for heavy traffic; 4 GB more with the `vlai` text classifier
 - 20 GB of free disk space
 - `openssl`
 - Internet access during the build: GitHub, Docker Hub, quay.io, proxy.golang.org, npm, PyPI
@@ -28,17 +30,16 @@ cd placitum-core
 ./install.sh install
 ```
 
-At the start the installer asks for the password of the panel user `admin`. You can just press
-Enter: a password is generated and shown once near the end of the installation. It is not stored in
-plain text anywhere. Without a terminal, pass the password in `PLC_PANEL_PASSWORD`.
+At the start the installer asks a few settings: node name, traffic ports, panel address and port,
+Redis memory. Enter takes the value in brackets. Then it asks for the password of the panel user
+`admin`. You can just press Enter: a password is generated and shown once near the end of the
+installation. It is not stored in plain text anywhere. Without a terminal, pass the password in
+`PLC_PANEL_PASSWORD` and the settings in the environment, see [INSTALL.md](INSTALL.md#installing).
 
-The rest runs on its own: the installer creates `.env`, issues keys, brings up the databases and the
-message bus, builds and starts the components and sets up the panel. The first build takes a while
+The rest runs on its own: the installer writes `.env` with new database passwords, issues keys,
+brings up the databases and the message bus, builds and starts the components and sets up the panel. The first build takes a while
 because the nginx module is compiled and the panel is built. If a step fails, the installation stops
 and shows the end of the log. The full log is written to `install.log`.
-
-If ports 80 and 443 are already taken on the machine, copy `.env.example` to `.env` before
-installing and change `PLC_HTTP_PORT` and `PLC_HTTPS_PORT`.
 
 ## After installation
 
@@ -67,6 +68,7 @@ route and check that traffic goes through Placitum is described in
 | --- | --- |
 | `./install.sh check` | checks the machine and settings without changing anything |
 | `./install.sh install` | installs everything in order; safe to run again |
+| `./install.sh reconfigure` | asks the settings again and applies them |
 | `./install.sh status` | shows what is running and the addresses |
 | `./install.sh panel-password` | changes the `admin` password and lifts the login lockout |
 | `./install.sh panel` | restores the panel server and login if they were deleted; other changes stay |
@@ -74,7 +76,8 @@ route and check that traffic goes through Placitum is described in
 | `./install.sh down` | stops everything; data stays |
 
 Options: `--no-build` starts already built images without rebuilding, `--sources <file>` takes
-component sources from another file.
+component sources from another file, `--defaults` asks nothing and takes settings from the
+environment or defaults.
 
 ## Configuration
 
@@ -89,9 +92,9 @@ describes every variable. The ones changed most often:
 | `PLC_NODE_ID` | `edge-01` | node name in the panel and the log |
 | `PLC_INFRA_PORTS` | `none` | `loopback` opens the databases, NATS and MinIO on 127.0.0.1 for access from the machine |
 | `PLC_COOKIE_SECURE` | `off` | set to `on` once the node serves HTTPS |
+| `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | by machine memory | memory of the two Redis instances, MB |
 
-Set the ports before installing. If you change them later, run `./install.sh install` again and the
-containers are recreated.
+`./install.sh reconfigure` changes the asked settings and recreates the containers they affect.
 
 ## Where components come from
 
@@ -146,6 +149,13 @@ Placitum itself (`compose/waf.yml`):
 Services set up their database schemas themselves on start: ClickHouse by `logger`, PostgreSQL by
 `controller` on an empty database.
 
+## Ready virtual machine
+
+`sh image/build.sh` builds a qcow2 image: Debian 13, Docker and all images. On the first boot the
+machine asks the settings on the console and installs itself in about a minute; later
+`sudo placitum reconfigure` changes them. Details and measured load are in
+[image/README.md](image/README.md).
+
 ## Installation without Docker
 
 There is an experimental option without Docker: everything on one Debian 13 machine, services
@@ -163,6 +173,7 @@ compose/        compose files: infra.yml for the infrastructure, waf.yml for eve
 config/         configs for NATS, ClickHouse, MinIO and the node, geo data directories
 bootstrap/      initial setup: keys, NATS streams, panel, configuration delivery
 native/         installation without Docker
+image/          ready virtual machine image
 secrets/        installation keys, not in git
 ```
 
@@ -170,7 +181,8 @@ secrets/        installation keys, not in git
 
 - Several protection nodes behind a load balancer: there is one node for now.
 - Upgrades with a single command.
-- Prebuilt images: everything is built from sources.
+- Prebuilt images in a registry: the installer builds from sources, only the virtual machine image
+  carries built images.
 - Kubernetes manifests.
 
 ## License

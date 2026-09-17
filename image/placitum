@@ -1,0 +1,38 @@
+#!/bin/sh
+# Placitum on this machine: sudo placitum <command>, the commands of
+# /opt/placitum/install.sh. Images are already on the machine and are never built.
+#
+#     sudo placitum reconfigure      ask the settings again and apply them
+#     sudo placitum status           what is running and how it is doing
+#     sudo placitum panel-password   change the panel admin password
+
+set -u
+
+[ "$(id -u)" -eq 0 ] || { printf 'run as root: sudo placitum %s\n' "$*" >&2; exit 1; }
+
+PLC_CLI="sudo placitum"
+export PLC_CLI
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    install|reconfigure)
+        /opt/placitum/install.sh "$cmd" --no-build "$@"
+        rc=$?
+
+        if [ "$rc" -eq 0 ]; then
+            mkdir -p /var/lib/placitum
+            touch /var/lib/placitum/installed
+        fi
+
+        /opt/placitum/image/firstboot.sh --issue
+        exit "$rc"
+        ;;
+    help|-h|--help)
+        sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)
+        exec /opt/placitum/install.sh "$cmd" "$@"
+        ;;
+esac
