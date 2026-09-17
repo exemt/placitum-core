@@ -65,6 +65,9 @@ Right after installation the panel has a single server: the panel itself. How to
 route and check that traffic goes through Placitum is described in
 [INSTALL.md](INSTALL.md#after-installation).
 
+The panel does everything through the controller API, and so can you: the reference is in
+[API.md](API.md).
+
 ## Commands
 
 | Command | What it does |
