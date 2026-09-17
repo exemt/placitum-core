@@ -51,7 +51,8 @@ INSPECTORS="ip modsec json counter action rewrite cookie captcha auth vlai"
 
 # Asked on the first install and by reconfigure. A value set in the environment
 # becomes the default answer.
-SETTINGS="PLC_NODE_ID PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_NODES PLC_NGINX_WORKERS"
+SETTINGS="PLC_NODE_ID PLC_TRAFFIC_BIND PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_SUBNET"
+SETTINGS="$SETTINGS PLC_NODES PLC_NGINX_WORKERS"
 
 for name in $INSPECTORS; do
     SETTINGS="$SETTINGS PLC_COPIES_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
@@ -76,8 +77,15 @@ upper() {
     printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
 }
 
-# Compose with the values that follow from the answers: the vlai profile, the captcha form and the
-# CPU cap of a node.
+# The machine image carries haproxy and its agent as services of this machine: with several nodes
+# they take the traffic ports instead of a haproxy container.
+host_balancer() {
+    [ -x /usr/local/bin/waf-haproxy-agent ] && [ -f /etc/systemd/system/placitum-haproxy.service ] &&
+        [ -d /run/systemd/system ]
+}
+
+# Compose with the values that follow from the answers: the vlai and haproxy profiles, the captcha
+# form, the CPU cap of a node and compose/layout.yml unless skip_layout says otherwise.
 compose() {
     file=$1
     shift
@@ -94,14 +102,18 @@ compose() {
 
         COMPOSE_PROFILES=""
         [ "${PLC_COPIES_VLAI:-0}" -eq 0 ] || COMPOSE_PROFILES=vlai
-        [ "${PLC_NODES:-1}" -le 1 ] || COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}nodes"
+
+        if [ "${PLC_NODES:-1}" -gt 1 ] && ! host_balancer; then
+            COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}nodes"
+        fi
+
         PLC_CAPTCHA_FORM=1
         [ "${PLC_COPIES_CAPTCHA:-1}" -gt 0 ] || PLC_CAPTCHA_FORM=0
         PLC_CPUS_EDGE=$edge
         export COMPOSE_PROFILES PLC_CAPTCHA_FORM PLC_CPUS_EDGE
 
-        if [ -f "$here/compose/nodes.yml" ]; then
-            set -- -f "$here/compose/$file" -f "$here/compose/nodes.yml" "$@"
+        if [ -f "$here/compose/layout.yml" ] && [ "${skip_layout:-no}" = no ]; then
+            set -- -f "$here/compose/$file" -f "$here/compose/layout.yml" "$@"
         else
             set -- -f "$here/compose/$file" "$@"
         fi
@@ -208,6 +220,96 @@ host_addrs() {
     machine_addrs | while read -r addr dev; do
         printf '  %-16s %-12s %s\n' "$addr" "$dev" "$(addr_kind "$addr")"
     done
+}
+
+# net <network> <what>: addresses in the installation network. base; gateway; nats, balancer and
+# node:<n> are fixed at its start; range is the upper half for the other containers, capacity their
+# number.
+net() {
+    awk -v cidr="$1" -v what="$2" '
+        function ip2n(s, p) { split(s, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4] }
+        function n2ip(n) { return int(n / 16777216) % 256 "." int(n / 65536) % 256 "." int(n / 256) % 256 "." n % 256 }
+        BEGIN {
+            split(cidr, c, "/")
+            size = 2 ^ (32 - c[2])
+            base = int(ip2n(c[1]) / size) * size
+            if (what == "base") print n2ip(base)
+            else if (what == "gateway") print n2ip(base + 1)
+            else if (what == "nats") print n2ip(base + 2)
+            else if (what == "balancer") print n2ip(base + 3)
+            else if (what ~ /^node:/) print n2ip(base + 10 + substr(what, 6))
+            else if (what == "range") print n2ip(base + size / 2) "/" (c[2] + 1)
+            else if (what == "capacity") print size / 2 - 2
+        }'
+}
+
+# The id of the installation network, when Docker has it.
+own_net() {
+    docker network inspect -f '{{.Id}}' "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null | cut -c1-12
+}
+
+# net_overlap <network>: the first network this machine reaches, by a route or a Docker network,
+# that overlaps the given one. The installation network itself does not count.
+net_overlap() {
+    own=$(own_net)
+
+    {
+        ip -o -4 route show 2>/dev/null | awk -v dev="br-$own" '
+            $1 != "default" { d = ""; for (i = 2; i < NF; i++) if ($i == "dev") d = $(i + 1); if (d != dev) print $1 }'
+
+        docker network ls -q 2>/dev/null | while read -r id; do
+            [ "$id" != "$own" ] || continue
+            docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$id" 2>/dev/null | tr ' ' '\n'
+        done
+    } | awk -v want="$1" '
+        function ip2n(s, p) { split(s, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4] }
+        function first(c, q) { split(c, q, "/"); if (q[2] == "") q[2] = 32; return int(ip2n(q[1]) / 2 ^ (32 - q[2])) * 2 ^ (32 - q[2]) }
+        function last(c, q) { split(c, q, "/"); if (q[2] == "") q[2] = 32; return first(c) + 2 ^ (32 - q[2]) - 1 }
+        BEGIN { a = first(want); b = last(want) }
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ { if (first($0) <= b && last($0) >= a) { print $0; exit } }'
+}
+
+# net_moves: Docker has the installation network with other addresses than the answers give it.
+net_moves() {
+    have=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}|{{.IPRange}}|{{.Gateway}} {{end}}' \
+        "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null | awk '{ print $1 }')
+
+    [ -n "$have" ] && [ "$have" != "$PLC_SUBNET|$(net "$PLC_SUBNET" range)|$(net "$PLC_SUBNET" gateway)" ]
+}
+
+# net_strangers: containers in the installation network that compose did not create for it. Labels
+# of an image do not count: compose writes its config hash only on containers it creates.
+net_strangers() {
+    docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null |
+        tr ' ' '\n' | while read -r name; do
+            [ -n "$name" ] || continue
+            mark=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}' "$name" 2>/dev/null || true)
+
+            case "$mark" in
+                "${COMPOSE_PROJECT_NAME:-placitum}|"?*) ;;
+                *) printf '%s ' "$name" ;;
+            esac
+        done
+}
+
+# The installation network Docker already has, or the first free one of a few.
+proposed_subnet() {
+    current=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' \
+        "${COMPOSE_PROJECT_NAME:-placitum}_default" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9.]+/[0-9]+$' | head -n 1)
+
+    if [ -n "$current" ] && is_subnet "$current"; then
+        printf '%s' "$current"
+        return 0
+    fi
+
+    for candidate in 172.30.0.0/24 172.29.0.0/24 172.28.0.0/24 10.230.0.0/24 10.231.0.0/24 192.168.230.0/24; do
+        if [ -z "$(net_overlap "$candidate")" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    printf '172.30.0.0/24'
 }
 
 check_panel() {
@@ -324,6 +426,42 @@ restore_env() {
     rm -f "$env_file.before"
 }
 
+# containers: how many containers the answers run, copies and nodes included.
+containers() {
+    skip_layout=yes
+    total=$(compose waf.yml config --format json | awk -v nodes="${PLC_NODES:-1}" '
+        /^  "services": \{/ { inside = 1; next }
+        inside && /^  [^ ]/ { inside = 0 }
+        inside && /^    "[^"]*": \{/ { total += 1 }
+        inside && /^        "replicas": [0-9]/ { n = $2; gsub(/,/, "", n); total += n - 1 }
+        END { print total + nodes - 1 }')
+    skip_layout=no
+    printf '%s' "$total"
+}
+
+# The installation network holds the answers: nodes, NATS and the haproxy container at its start,
+# every other container in its upper half.
+check_network() {
+    fixed=$((${PLC_NODES:-1} + 1))
+
+    if [ "${PLC_NODES:-1}" -gt 1 ] && ! host_balancer; then
+        fixed=$((fixed + 1))
+    fi
+
+    others=$(($(containers) - fixed))
+    capacity=$(net "$PLC_SUBNET" capacity)
+
+    [ "$others" -le "$capacity" ] ||
+        die "network $PLC_SUBNET has room for $capacity containers besides nodes and NATS, the answers run $others: choose a larger network; nothing changed"
+
+    # Docker rebuilds the network only when nothing is attached to it.
+    if net_moves; then
+        strangers=$(net_strangers)
+        [ -z "$strangers" ] ||
+            die "containers of other projects are attached to the installation network: ${strangers% }; disconnect them (docker network disconnect) or keep the network; nothing changed"
+    fi
+}
+
 # A machine that does not build images needs an image for everything the answers run.
 check_images() {
     [ "$build" = no ] || return 0
@@ -395,6 +533,7 @@ prepare_env() {
         setup=reconfigure
     done
 
+    check_network
     check_images
     check_catalog
     trap - EXIT INT TERM
@@ -406,7 +545,7 @@ prepare_env() {
     quietly "keys and secrets" env MINIO_ROOT_USER="${MINIO_ROOT_USER:-waf}" \
         MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-wafwafwaf}" sh "$here/bootstrap/secrets.sh"
 
-    node_files
+    layout_files
 }
 
 # node_name <n>: node n takes the number at the end of PLC_NODE_ID, edge-01 gives edge-02.
@@ -427,13 +566,27 @@ node_name() {
     fi
 }
 
-# node.conf of every node and compose/nodes.yml with the nodes after the first, rebuilt from the
-# answers on every run.
-node_files() {
-    count=${PLC_NODES:-1}
-    nodes="$here/compose/nodes.yml"
+# address <ip>: the fixed address of a service in compose/layout.yml.
+address() {
+    printf '    networks:\n      default:\n        ipv4_address: %s\n' "$1"
+}
 
-    rm -f "$here"/config/edge/node-*.conf
+# traffic_ports: HTTP and HTTPS on every traffic address; 0.0.0.0 publishes on IPv6 as well.
+traffic_ports() {
+    for addr in $(printf '%s' "$PLC_TRAFFIC_BIND" | tr ',' ' '); do
+        at="$addr:"
+        [ "$addr" != 0.0.0.0 ] || at=""
+        printf '      - "%s%s:8080"\n      - "%s%s:8443"\n' "$at" "$PLC_HTTP_PORT" "$at" "$PLC_HTTPS_PORT"
+    done
+}
+
+# node.conf of every node and compose/layout.yml: the installation network, fixed addresses, traffic
+# ports and the nodes after the first, rebuilt from the answers on every run.
+layout_files() {
+    count=${PLC_NODES:-1}
+    layout="$here/compose/layout.yml"
+
+    rm -f "$here"/config/edge/node-*.conf "$here/compose/nodes.yml"
 
     i=1
     while [ "$i" -le "$count" ]; do
@@ -450,17 +603,37 @@ node_files() {
     [ "$count" -eq 1 ] || printf ' ... %s' "$(node_name "$count")"
     printf '\n'
 
-    if [ "$count" -eq 1 ]; then
-        rm -f "$nodes"
-        return 0
+    # The traffic ports belong to the single node, to the haproxy container or to haproxy on this
+    # machine, which binds them itself.
+    owner=edge
+    if [ "$count" -gt 1 ]; then
+        owner=balancer
+        ! host_balancer || owner=host
     fi
 
     {
-        printf '# Written by install.sh from PLC_NODES: changes here are lost on the next run.\n\n'
-        printf 'services:\n'
-        printf '  edge:\n'
+        printf '# Written by install.sh from the answers: changes here are lost on the next run.\n\n'
+        printf 'networks:\n  default:\n    ipam:\n      config:\n'
+        printf '        - subnet: %s\n' "$PLC_SUBNET"
+        printf '          ip_range: %s\n' "$(net "$PLC_SUBNET" range)"
+        printf '          gateway: %s\n' "$(net "$PLC_SUBNET" gateway)"
+
+        printf '\nservices:\n'
+        printf '  nats:\n'
+        address "$(net "$PLC_SUBNET" nats)"
+
+        printf '\n  edge:\n'
         printf '    ports: !override\n'
-        printf '      - "${PLC_PANEL_BIND:-127.0.0.1}:${PLC_PANEL_PORT:-8081}:8081"\n'
+        [ "$owner" != edge ] || traffic_ports
+        printf '      - "%s:%s:8081"\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
+        address "$(net "$PLC_SUBNET" node:1)"
+
+        if [ "$owner" = balancer ]; then
+            printf '\n  balancer:\n'
+            printf '    ports: !override\n'
+            traffic_ports
+            address "$(net "$PLC_SUBNET" balancer)"
+        fi
 
         i=2
         while [ "$i" -le "$count" ]; do
@@ -479,17 +652,20 @@ node_files() {
             printf '      - ../config/edge/node-%s.conf:/etc/nginx/waf-node.conf:ro\n' "$n"
             printf '      - edge-%s-data:/var/lib/waf/agent\n' "$n"
             printf '      - edge-%s-store:/var/lib/waf/store\n' "$n"
+            address "$(net "$PLC_SUBNET" "node:$i")"
             i=$((i + 1))
         done
 
-        printf '\nvolumes:\n'
+        if [ "$count" -gt 1 ]; then
+            printf '\nvolumes:\n'
 
-        i=2
-        while [ "$i" -le "$count" ]; do
-            printf '  edge-%s-data:\n  edge-%s-store:\n' "$(printf '%02d' "$i")" "$(printf '%02d' "$i")"
-            i=$((i + 1))
-        done
-    } > "$nodes"
+            i=2
+            while [ "$i" -le "$count" ]; do
+                printf '  edge-%s-data:\n  edge-%s-store:\n' "$(printf '%02d' "$i")" "$(printf '%02d' "$i")"
+                i=$((i + 1))
+            done
+        fi
+    } > "$layout"
 }
 
 set_env() {
@@ -518,16 +694,47 @@ is_http_port()  { is_port "$1" && [ "$1" != "${PLC_CONTROLLER_PORT:-8080}" ]; }
 is_https_port() { is_http_port "$1" && [ "$1" != "${PLC_HTTP_PORT:-}" ]; }
 is_panel_port() { is_https_port "$1" && [ "$1" != "${PLC_HTTPS_PORT:-}" ]; }
 
+is_ipv4() {
+    printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' &&
+        printf '%s' "$1" | awk -F. '{ for (i = 1; i <= 4; i++) if ($i > 255) exit 1 }'
+}
+
 is_bind() {
     case "$1" in
         0.0.0.0|127.0.0.1) return 0 ;;
-        *:*) return 1 ;;
     esac
 
+    is_ipv4 "$1" || return 1
     command -v ip >/dev/null 2>&1 || return 0
     ip -o -4 addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "$1"
 }
 
+# is_bind_list: 0.0.0.0, or up to eight addresses of this machine separated by commas.
+is_bind_list() {
+    [ "$1" != 0.0.0.0 ] || return 0
+
+    case "$1" in
+        ''|*' '*|,*|*,|*,,*) return 1 ;;
+    esac
+
+    seen=" "
+    for addr in $(printf '%s' "$1" | tr ',' ' '); do
+        [ "$addr" != 0.0.0.0 ] && is_bind "$addr" || return 1
+
+        case "$seen" in *" $addr "*) return 1 ;; esac
+        seen="$seen$addr "
+    done
+
+    [ "$(printf '%s' "$seen" | wc -w)" -le 8 ]
+}
+
+# is_subnet: an IPv4 network from /16 to /24 that overlaps no network this machine reaches.
+is_subnet() {
+    printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/(1[6-9]|2[0-4])$' || return 1
+    is_ipv4 "${1%/*}" && [ "$(net "$1" base)" = "${1%/*}" ] && [ -z "$(net_overlap "$1")" ]
+}
+
+# why <check> <answer>: what a valid answer looks like.
 why() {
     case "$1" in
         is_name)       echo "lowercase latin letters, digits and hyphens" ;;
@@ -539,6 +746,19 @@ why() {
         is_https_port) echo "a port from 1 to 65535, not the HTTP port or the controller API port" ;;
         is_panel_port) echo "a port from 1 to 65535, not a traffic port or the controller API port" ;;
         is_bind)       echo "0.0.0.0, 127.0.0.1 or an IPv4 address of this machine" ;;
+        is_bind_list)  echo "0.0.0.0, or up to 8 IPv4 addresses of this machine separated by commas without spaces" ;;
+        is_subnet)
+            overlap=""
+            if printf '%s' "${2:-}" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'; then
+                overlap=$(net_overlap "$2")
+            fi
+
+            if [ -n "$overlap" ]; then
+                echo "overlaps $overlap, a network this machine already reaches"
+            else
+                echo "an IPv4 network from /16 to /24 written from its first address, such as 172.30.0.0/24"
+            fi
+            ;;
     esac
 }
 
@@ -551,7 +771,7 @@ ask() {
 
     case "$setup" in
         keep)
-            [ -z "$current" ] || "$check" "$current" || die "$env_file: $var=$current -- $(why "$check")"
+            [ -z "$current" ] || "$check" "$current" || die "$env_file: $var=$current -- $(why "$check" "$current")"
             return 0
             ;;
         reconfigure)
@@ -573,8 +793,8 @@ ask() {
 
         "$check" "$answer" && break
 
-        [ "$interactive" = yes ] || die "$var=$answer -- $(why "$check")"
-        warn "$(why "$check")"
+        [ "$interactive" = yes ] || die "$var=$answer -- $(why "$check" "$answer")"
+        warn "$(why "$check" "$answer")"
     done
 
     eval "$var=\$answer"
@@ -595,16 +815,36 @@ settings() {
         say "settings"
     fi
 
-    ask PLC_NODE_ID    is_name       edge-01 "Node name, shown in the panel and the audit"
-    ask PLC_HTTP_PORT  is_http_port  80      "HTTP traffic port"
-    ask PLC_HTTPS_PORT is_https_port 443     "HTTPS traffic port"
+    ask PLC_NODE_ID is_name edge-01 "Node name, shown in the panel and the audit"
 
     if [ "$setup" != keep ] && [ "$interactive" = yes ]; then
         host_addrs
     fi
 
-    ask PLC_PANEL_BIND is_bind       127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
-    ask PLC_PANEL_PORT is_panel_port 8081      "Panel port"
+    ask PLC_TRAFFIC_BIND is_bind_list  0.0.0.0   "Traffic addresses: 0.0.0.0 for all, or addresses of this machine separated by commas"
+    ask PLC_HTTP_PORT    is_http_port  80        "HTTP traffic port"
+    ask PLC_HTTPS_PORT   is_https_port 443       "HTTPS traffic port"
+    ask PLC_PANEL_BIND   is_bind       127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
+    ask PLC_PANEL_PORT   is_panel_port 8081      "Panel port"
+
+    # The network is proposed only when it is asked or missing: the proposal looks at every route.
+    subnet=""
+    if [ "$setup" != keep ] || [ -z "${PLC_SUBNET:-}" ]; then
+        subnet=$(proposed_subnet)
+    fi
+
+    ask PLC_SUBNET is_subnet "$subnet" "Installation network for the containers, /16 to /24, apart from the networks of this machine"
+
+    # A .env from before these settings gets them without a question.
+    if [ -z "${PLC_TRAFFIC_BIND:-}" ]; then
+        PLC_TRAFFIC_BIND=0.0.0.0
+        set_env PLC_TRAFFIC_BIND "$PLC_TRAFFIC_BIND"
+    fi
+
+    if [ -z "${PLC_SUBNET:-}" ]; then
+        PLC_SUBNET=$subnet
+        set_env PLC_SUBNET "$PLC_SUBNET"
+    fi
 
     # Nodes, inspectors and memory come with values that suit most machines.
     asked=$interactive
@@ -645,10 +885,12 @@ settings() {
 label() {
     case "$1" in
         PLC_NODE_ID)           echo "node name" ;;
+        PLC_TRAFFIC_BIND)      echo "traffic addresses" ;;
         PLC_HTTP_PORT)         echo "HTTP port" ;;
         PLC_HTTPS_PORT)        echo "HTTPS port" ;;
         PLC_PANEL_BIND)        echo "panel address" ;;
         PLC_PANEL_PORT)        echo "panel port" ;;
+        PLC_SUBNET)            echo "installation network" ;;
         PLC_NODES)             echo "nodes" ;;
         PLC_NGINX_WORKERS)     echo "nginx processes per node" ;;
         PLC_REDIS_EXCHANGE_MB) echo "exchange Redis, MB" ;;
@@ -668,16 +910,21 @@ plan() {
     say "plan"
 
     workers=${PLC_NGINX_WORKERS:-auto}
+    where="in a container"
+    ! host_balancer || where="on this machine"
+
+    printf '  traffic      %s, ports %s and %s\n' "$PLC_TRAFFIC_BIND" "$PLC_HTTP_PORT" "$PLC_HTTPS_PORT"
 
     if [ "${PLC_NODES:-1}" -gt 1 ]; then
-        printf '  nodes        %s from %s, %s nginx processes each, haproxy in front on ports %s and %s\n' \
-            "$PLC_NODES" "$PLC_NODE_ID" "$workers" "$PLC_HTTP_PORT" "$PLC_HTTPS_PORT"
+        printf '  nodes        %s from %s, %s nginx processes each, haproxy %s in front\n' \
+            "$PLC_NODES" "$PLC_NODE_ID" "$workers" "$where"
     else
-        printf '  node         %s, %s nginx processes, ports %s and %s\n' \
-            "$PLC_NODE_ID" "$workers" "$PLC_HTTP_PORT" "$PLC_HTTPS_PORT"
+        printf '  node         %s, %s nginx processes\n' "$PLC_NODE_ID" "$workers"
     fi
 
     printf '  panel        %s:%s\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
+    printf '  network      %s\n' "$PLC_SUBNET"
+    ! net_moves || printf '               the network is rebuilt: every container restarts, data stays\n'
 
     on=""
     off=""
@@ -756,6 +1003,12 @@ infra_services="nats nats-box postgres clickhouse redis redis-internal minio min
 
 infra() {
     say "infrastructure"
+
+    # A rebuilt network takes every container out of the old one first; volumes stay.
+    if net_moves; then
+        quietly "containers out of the old network" compose waf.yml down --remove-orphans
+    fi
+
     # shellcheck disable=SC2086
     quietly "postgres, clickhouse, redis, nats, minio" compose waf.yml up -d --wait $infra_services
 }
@@ -770,6 +1023,28 @@ migrate() {
     quietly "PostgreSQL schema" compose waf.yml run --rm --no-deps controller node src/migrate.ts
 }
 
+# balancer_host start|stop: haproxy and its agent as services of this machine, when it has them.
+balancer_host() {
+    host_balancer || return 0
+
+    case "$1" in
+        stop)
+            if systemctl is-enabled --quiet placitum-haproxy 2>/dev/null ||
+                systemctl is-active --quiet placitum-haproxy 2>/dev/null; then
+                quietly "haproxy on this machine off" systemctl disable --now placitum-haproxy-agent placitum-haproxy
+            fi
+            ;;
+        start)
+            install -d -m 0755 /etc/placitum
+            printf 'WAF_NATS_URL=nats://%s:4222\n' "$(net "$PLC_SUBNET" nats)" > /etc/placitum/haproxy-agent.env
+            quietly "haproxy and its agent on this machine" sh -c \
+                'systemctl enable placitum-haproxy placitum-haproxy-agent &&
+                 systemctl start placitum-haproxy &&
+                 systemctl restart placitum-haproxy-agent'
+            ;;
+    esac
+}
+
 components() {
     say "components"
 
@@ -778,8 +1053,13 @@ components() {
         compose waf.yml --profile vlai rm --stop --force inspector-vlai >> "$log_file" 2>&1 || true
     fi
 
-    if [ "${PLC_NODES:-1}" -le 1 ]; then
+    if [ "${PLC_NODES:-1}" -le 1 ] || host_balancer; then
         compose waf.yml --profile nodes rm --stop --force balancer >> "$log_file" 2>&1 || true
+    fi
+
+    # haproxy on this machine lets the traffic ports go before a single node takes them.
+    if [ "${PLC_NODES:-1}" -le 1 ]; then
+        balancer_host stop
     fi
 
     docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-placitum}" \
@@ -850,6 +1130,8 @@ panel() {
 }
 
 # layout.mjs in the controller with the answers: inspectors, nginx processes, nodes behind haproxy.
+# The nodes take PROXY protocol only from haproxy: the address of its container, or the gateway of
+# the installation network for haproxy on this machine.
 layout_run() {
     nodes=""
     inspectors=""
@@ -858,7 +1140,7 @@ layout_run() {
     while [ "$i" -le "${PLC_NODES:-1}" ]; do
         service=edge
         [ "$i" -eq 1 ] || service="edge-$(printf '%02d' "$i")"
-        nodes="$nodes $service:$(node_name "$i")"
+        nodes="$nodes $service:$(node_name "$i"):$(net "$PLC_SUBNET" "node:$i")"
         i=$((i + 1))
     done
 
@@ -869,12 +1151,27 @@ layout_run() {
         [ "$copies" -eq 0 ] || inspectors="$inspectors $name"
     done
 
+    balancer=container
+    trust=$(net "$PLC_SUBNET" balancer)
+
+    if host_balancer; then
+        balancer=host
+        trust=$(net "$PLC_SUBNET" gateway)
+    fi
+
+    bind=""
+    [ "${PLC_TRAFFIC_BIND:-0.0.0.0}" = 0.0.0.0 ] || bind=$(printf '%s' "$PLC_TRAFFIC_BIND" | tr ',' ' ')
+
     compose waf.yml exec -T \
         -e "LAYOUT_STEP=$1" \
         -e "LAYOUT_INSPECTORS=${inspectors# }" \
         -e "LAYOUT_WORKERS=${PLC_NGINX_WORKERS:-auto}" \
         -e "LAYOUT_NODES=${nodes# }" \
-        controller node --input-type=module -e "$(cat "$here/bootstrap/layout.mjs")"
+        -e "LAYOUT_BALANCER=$balancer" \
+        -e "LAYOUT_TRUST=$trust" \
+        -e "LAYOUT_BIND=$bind" \
+        -e "LAYOUT_PORTS=${PLC_HTTP_PORT:-80} ${PLC_HTTPS_PORT:-443}" \
+        controller node --input-type=module -e "$(cat "$here/bootstrap/layout.mjs")" < /dev/null
 }
 
 layout() {
@@ -902,7 +1199,7 @@ publish() {
     printf '\n== %s publish\n' "$(date '+%F %T')" >> "$log_file"
 
     if ! result=$(compose waf.yml exec -T controller \
-        node --input-type=module -e "$(cat "$here/bootstrap/publish.mjs")" 2>> "$log_file"); then
+        node --input-type=module -e "$(cat "$here/bootstrap/publish.mjs")" 2>> "$log_file" < /dev/null); then
         printf 'failed\n'
         log_tail
         die "configuration channels did not converge, log: $log_file"
@@ -917,7 +1214,7 @@ panel_password() {
     panel reset
 
     compose waf.yml exec -T redis-internal sh -c \
-        "redis-cli --scan --pattern 'auth:*:panel/*' | xargs -r redis-cli del >/dev/null" &&
+        "redis-cli --scan --pattern 'auth:*:panel/*' | xargs -r redis-cli del >/dev/null" < /dev/null &&
         printf 'panel login lockouts cleared\n'
 }
 
@@ -928,11 +1225,18 @@ health() {
 
     if [ -z "$bad" ]; then
         printf 'containers: %s, all running\n' "$total"
-        return 0
+    else
+        warn "containers with problems ($(printf '%s\n' "$bad" | grep -c .) of $total):"
+        printf '%s\n' "$bad" | sed 's/^/     /' >&2
     fi
 
-    warn "containers with problems ($(printf '%s\n' "$bad" | grep -c .) of $total):"
-    printf '%s\n' "$bad" | sed 's/^/     /' >&2
+    if [ "${PLC_NODES:-1}" -gt 1 ] && host_balancer; then
+        if systemctl is-active --quiet placitum-haproxy && systemctl is-active --quiet placitum-haproxy-agent; then
+            printf 'haproxy on this machine: running\n'
+        else
+            warn "haproxy on this machine is not running: systemctl status placitum-haproxy placitum-haproxy-agent"
+        fi
+    fi
 }
 
 summary() {
@@ -954,7 +1258,7 @@ summary() {
     printf 'login:   admin, change the password with %s panel-password\n' "$cli"
     printf 'API:     http://127.0.0.1:%s, no login, this machine only (from elsewhere use ssh -L)\n' \
         "${PLC_CONTROLLER_PORT:-8080}"
-    printf 'traffic: port %s\n' "${PLC_HTTP_PORT:-80}"
+    printf 'traffic: %s, ports %s and %s\n' "${PLC_TRAFFIC_BIND:-0.0.0.0}" "${PLC_HTTP_PORT:-80}" "${PLC_HTTPS_PORT:-443}"
     printf 'log:     %s\n' "$log_file"
 }
 
@@ -969,6 +1273,12 @@ install_all() {
     components
     panel
     layout
+
+    # haproxy on this machine starts once the controller holds its configuration for these nodes.
+    if [ "${PLC_NODES:-1}" -gt 1 ]; then
+        balancer_host start
+    fi
+
     publish
     say "done"
     rm -f "$env_file.before"
@@ -1009,6 +1319,9 @@ case "$cmd" in
         fi
         ;;
     status)
+        [ -f "$env_file" ] || die "$env_file not found: install first ($cli install)"
+        # shellcheck disable=SC1090
+        . "$env_file"
         say "status"
         compose waf.yml ps
         printf '\n'
@@ -1018,6 +1331,7 @@ case "$cmd" in
     down)
         say "stopping"
         compose waf.yml down
+        balancer_host stop
         ;;
     help|-h|--help)
         sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'

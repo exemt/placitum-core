@@ -3,9 +3,10 @@
 // one line per change.
 //
 // LAYOUT_INSPECTORS: processes that run. LAYOUT_WORKERS: auto or a number. LAYOUT_NODES:
-// "service:name" per node, the first node first. LAYOUT_STEP=catalog stops after the catalog.
-
-import { networkInterfaces } from "node:os";
+// "service:name:address" per node, the first node first. LAYOUT_BALANCER: container or host, where
+// haproxy runs. LAYOUT_TRUST: the only address the nodes take PROXY protocol from. LAYOUT_BIND:
+// traffic addresses of haproxy on the host, empty for all. LAYOUT_PORTS: HTTP and HTTPS traffic
+// ports. LAYOUT_STEP=catalog stops after the catalog.
 
 const API = `http://127.0.0.1:${process.env.CONTROLLER_PORT ?? "8080"}`;
 const INSPECTORS = (process.env.LAYOUT_INSPECTORS ?? "").split(" ").filter((name) => name !== "");
@@ -14,16 +15,22 @@ const NODES = (process.env.LAYOUT_NODES ?? "edge:edge-01")
   .split(" ")
   .filter((row) => row !== "")
   .map((row) => {
-    const [host, name] = row.split(":");
-    return { host, name };
+    const [service, name, address] = row.split(":");
+    return { service, name, address: address ?? service };
   });
+const HOST = process.env.LAYOUT_BALANCER === "host";
+const TRUST = process.env.LAYOUT_TRUST ?? "";
+const BIND = (process.env.LAYOUT_BIND ?? "").split(" ").filter((addr) => addr !== "");
+const [HTTP_PORT, HTTPS_PORT] = (process.env.LAYOUT_PORTS ?? "80 443").split(" ").map(Number);
 
 // With more than one node haproxy owns the traffic ports and speaks PROXY protocol to the nodes.
 const PROXY = NODES.length > 1;
 
+// Node ports; haproxy in a container listens on the same ports, haproxy on the host on the traffic
+// ports themselves.
 const TRAFFIC = [
-  { name: "http-8080", port: 8080, ssl: false, frontend: "http" },
-  { name: "https-8443", port: 8443, ssl: true, frontend: "https" },
+  { name: "http-8080", port: 8080, ssl: false, frontend: "http", entry: HTTP_PORT },
+  { name: "https-8443", port: 8443, ssl: true, frontend: "https", entry: HTTPS_PORT },
 ];
 
 const say = (line) => process.stdout.write(`${line}\n`);
@@ -43,24 +50,27 @@ async function api(method, path, body) {
   return text === "" ? null : JSON.parse(text);
 }
 
-// The network of this container: only haproxy inside it may tell the nodes a client address.
-function ownSubnet() {
-  for (const rows of Object.values(networkInterfaces())) {
-    for (const row of rows ?? []) {
-      if (row.family !== "IPv4" || row.internal || row.cidr === null) {
-        continue;
-      }
-
-      const [addr, bits] = row.cidr.split("/");
-      const mask = Number(bits) === 0 ? 0 : (~0 << (32 - Number(bits))) >>> 0;
-      const ip = addr.split(".").reduce((n, part) => n * 256 + Number(part), 0);
-      const net = (ip & mask) >>> 0;
-
-      return `${[24, 16, 8, 0].map((shift) => (net >>> shift) & 255).join(".")}/${bits}`;
-    }
+// JSON with sorted keys: the API answers in its own key order.
+function canon(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canon).join(",")}]`;
   }
 
-  throw new Error("no IPv4 address in the controller container");
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canon(value[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+const same = (a, b) => canon(a) === canon(b);
+
+if (PROXY && TRUST === "") {
+  throw new Error("LAYOUT_TRUST is empty: the nodes would take PROXY protocol from nobody");
 }
 
 const { spaces } = await api("GET", "/api/spaces");
@@ -115,13 +125,13 @@ if (nginxMain.workerProcesses !== workers) {
 }
 
 if (PROXY) {
-  const from = [ownSubnet()];
+  const from = [`${TRUST}/32`];
 
-  if (nginx.realIpHeader !== "proxy_protocol" || JSON.stringify(nginx.realIpFrom) !== JSON.stringify(from)) {
+  if (nginx.realIpHeader !== "proxy_protocol" || !same(nginx.realIpFrom, from)) {
     nginx.realIpHeader = "proxy_protocol";
     nginx.realIpFrom = from;
     httpChanged = true;
-    say(`client address from PROXY protocol, trusted from ${from[0]}`);
+    say(`client address from PROXY protocol, trusted from ${TRUST} only`);
   }
 } else if (nginx.realIpHeader === "proxy_protocol") {
   delete nginx.realIpHeader;
@@ -175,23 +185,36 @@ for (const want of TRAFFIC) {
 const haproxy = (await api("GET", `${base}/haproxy`)).settings ?? {};
 
 if (PROXY) {
+  // Nodes by their fixed addresses: haproxy on the host has no Docker DNS, and the container does
+  // not need it.
   const next = {
     ...haproxy,
     frontends: TRAFFIC.map((row) => ({
       name: row.frontend,
-      port: row.port,
+      port: HOST ? row.entry : row.port,
       mode: "tcp",
+      ...(HOST ? { server_port: row.port } : {}),
       send_proxy: true,
+      ...(HOST && BIND.length > 0 ? { addresses: BIND } : {}),
     })),
-    backend: { ...(haproxy.backend ?? {}), servers: NODES.map((node) => ({ name: node.name, host: node.host })) },
-    docker_dns: true,
+    backend: { ...(haproxy.backend ?? {}), servers: NODES.map((node) => ({ name: node.name, host: node.address })) },
+    docker_dns: false,
   };
 
-  if (JSON.stringify(next.frontends) !== JSON.stringify(haproxy.frontends) ||
-    JSON.stringify(next.backend.servers) !== JSON.stringify(haproxy.backend?.servers)) {
-    await api("PUT", `${base}/haproxy`, next);
-    say(`haproxy: ${NODES.length} nodes behind ports 8080 and 8443`);
+  // The stats page of haproxy on the host would listen on every address of the machine.
+  if (HOST) {
+    next.stats = { ...(haproxy.stats ?? {}), enabled: false };
   }
+
+  if (!same(next, haproxy)) {
+    await api("PUT", `${base}/haproxy`, next);
+    say(`haproxy ${HOST ? "on this machine" : "in a container"}: ${NODES.length} nodes behind ports ${
+      HOST ? `${HTTP_PORT} and ${HTTPS_PORT}` : "8080 and 8443"
+    }`);
+  }
+
+  // The controller holds the configuration before haproxy on the host starts and reads it.
+  await api("POST", `${base}/haproxy/send`, {});
 } else if (haproxy.frontends !== undefined) {
   const next = { ...haproxy };
   delete next.frontends;
@@ -199,6 +222,19 @@ if (PROXY) {
   if (next.backend !== undefined) {
     next.backend = { ...next.backend };
     delete next.backend.servers;
+  }
+
+  if (next.docker_dns === false) {
+    delete next.docker_dns;
+  }
+
+  if (next.stats?.enabled === false) {
+    next.stats = { ...next.stats };
+    delete next.stats.enabled;
+
+    if (Object.keys(next.stats).length === 0) {
+      delete next.stats;
+    }
   }
 
   await api("PUT", `${base}/haproxy`, next);

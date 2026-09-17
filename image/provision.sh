@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs as root on the build machine of image/build.sh: Docker, Placitum files and
-# images, the first boot service, then cleanup and power off.
+# Runs as root on the build machine of image/build.sh: Docker, haproxy, Placitum
+# files and images, the first boot service, then cleanup and power off.
 
 set -eu
 
@@ -11,7 +11,10 @@ say() { printf '\n== %s\n' "$*"; }
 say "packages"
 
 apt-get update -q
-apt-get install -y -q --no-install-recommends ca-certificates curl gnupg openssl
+apt-get install -y -q --no-install-recommends ca-certificates curl gnupg openssl haproxy
+
+# haproxy of the distribution stays off: install.sh runs its own service for several nodes.
+systemctl disable --now haproxy
 
 install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
@@ -60,6 +63,13 @@ useradd -m -s /bin/bash -G sudo,docker placitum
 passwd -l placitum
 
 install -m 0755 /opt/placitum/image/placitum /usr/local/sbin/placitum
+
+# haproxy in front of several nodes and its agent; install.sh enables them when it needs them.
+install -m 0755 /tmp/waf-haproxy-agent /usr/local/bin/waf-haproxy-agent
+install -m 0644 /opt/placitum/image/balancer/placitum-haproxy.service \
+    /opt/placitum/image/balancer/placitum-haproxy-agent.service /etc/systemd/system/
+systemctl daemon-reload
+
 install -m 0644 /opt/placitum/image/placitum-firstboot.service /etc/systemd/system/
 systemctl enable placitum-firstboot.service
 sh /opt/placitum/image/firstboot.sh --issue
@@ -71,7 +81,7 @@ printf '[Service]\nExecStartPre=-/usr/bin/ssh-keygen -A\n' > /etc/systemd/system
 say "cleanup"
 
 apt-get clean
-rm -rf /var/lib/apt/lists/* /tmp/core.tar /tmp/retag.txt /tmp/MANIFEST
+rm -rf /var/lib/apt/lists/* /tmp/core.tar /tmp/retag.txt /tmp/MANIFEST /tmp/waf-haproxy-agent
 
 cat > /root/seal.sh <<'EOF'
 #!/bin/sh

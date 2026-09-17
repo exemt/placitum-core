@@ -124,6 +124,12 @@ PLC_VERSION=${PLC_VERSION:-dev} PLC_REVISION=$revision \
     compose --profile nodes -f "$work/names.yml" build > "$work/build.log" 2>&1 ||
     die "image build failed, log: $work/build.log"
 
+# On the machine haproxy for several nodes runs as a service: its agent comes out of the image.
+agent=$(docker create placitum-image/balancer)
+docker cp "$agent:/usr/local/bin/waf-haproxy-agent" "$work/waf-haproxy-agent" >/dev/null ||
+    die "no haproxy agent in placitum-image/balancer"
+docker rm "$agent" >/dev/null
+
 while read -r image; do
     case "$image" in
         placitum-image/*) ;;
@@ -201,7 +207,7 @@ done
 
 # shellcheck disable=SC2086
 scp $ssh_opts -q -P "$VM_SSH_PORT" "$work/core.tar" "$work/images.tar" "$work/retag.txt" \
-    "$work/MANIFEST" "$here/provision.sh" build@127.0.0.1:/tmp/ ||
+    "$work/MANIFEST" "$work/waf-haproxy-agent" "$here/provision.sh" build@127.0.0.1:/tmp/ ||
     die "copy to the build machine failed"
 
 # shellcheck disable=SC2086
@@ -220,6 +226,6 @@ say "image"
 
 out="$work/placitum-$revision.qcow2"
 qemu-img convert -c -O qcow2 "$vm/disk.qcow2" "$out"
-rm -rf "$vm" "$work/images.tar" "$work/core.tar"
+rm -rf "$vm" "$work/images.tar" "$work/core.tar" "$work/waf-haproxy-agent"
 
 printf 'image: %s, %s\n' "$out" "$(du -h "$out" | cut -f1)"
