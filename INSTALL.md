@@ -114,11 +114,10 @@ and does nothing else.
 Eight infrastructure services and Placitum itself: the protection node, the controller with the
 panel, logger and search, `crypto`, `geo`, `keeper`, nine inspectors (`ip`, `modsec`, `json`,
 `counter`, `action`, `rewrite`, `cookie`, `auth` with the login form, `captcha` with the widget) and
-three monitoring sidecars. The text classifier `vlai` is behind a compose profile:
-
-```sh
-docker compose --env-file .env --env-file sources.env -f compose/waf.yml --profile vlai up -d
-```
+three monitoring sidecars. The text classifier `vlai` is behind a compose profile. To run it, add
+`COMPOSE_PROFILES=vlai` to `.env` and run `./install.sh install` again: the installer builds and
+starts the classifier and adds it to the inspector catalog. Without the profile the catalog has no
+`vlai`, so routes cannot call a process that does not run.
 
 Only the node is exposed: traffic (`PLC_HTTP_PORT`) and the panel (`PLC_PANEL_BIND`,
 `PLC_PANEL_PORT`). The controller is published on `127.0.0.1` only. Login forms, the captcha widget,

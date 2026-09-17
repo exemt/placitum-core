@@ -112,11 +112,10 @@ PLC_NODE_ID=edge-02 PLC_PANEL_BIND=10.0.0.5 PLC_PANEL_PASSWORD=… ./install.sh 
 Восемь сервисов инфраструктуры и сам Placitum: узел защиты, контроллер с панелью, логгер и поиск,
 `crypto`, `geo`, `keeper`, девять инспекторов (`ip`, `modsec`, `json`, `counter`, `action`,
 `rewrite`, `cookie`, `auth` с формой входа, `captcha` с виджетом) и три агента наблюдения.
-Классификатор текста `vlai` включается профилем compose:
-
-```sh
-docker compose --env-file .env --env-file sources.env -f compose/waf.yml --profile vlai up -d
-```
+Классификатор текста `vlai` включается профилем compose. Чтобы его запустить, добавьте
+`COMPOSE_PROFILES=vlai` в `.env` и снова выполните `./install.sh install`: установщик соберёт и
+запустит классификатор и добавит его в каталог инспекторов. Без профиля `vlai` в каталоге нет, и
+маршруты не могут звать процесс, который не работает.
 
 Наружу открыт только узел: трафик (`PLC_HTTP_PORT`) и панель (`PLC_PANEL_BIND`, `PLC_PANEL_PORT`).
 Контроллер опубликован только на `127.0.0.1`. Формы входа, виджет капчи, поиск и `crypto` остаются

@@ -414,7 +414,8 @@ services:
     secrets:
       - waf_cookie_hmac
 
-  # Heavy, downloads model weights on first start: docker compose --profile vlai up -d
+  # Heavy, downloads model weights on first start. COMPOSE_PROFILES=vlai in .env enables it, and
+  # install.sh adds it to the inspector catalog.
   inspector-vlai:
     profiles: ["vlai"]
     cpus: "${PLC_CPUS:-2}"

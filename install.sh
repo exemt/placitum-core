@@ -479,6 +479,28 @@ panel() {
     esac
 }
 
+# The vlai classifier runs only with its compose profile, and only then is it in the inspector catalog.
+vlai_catalog() {
+    case ",${COMPOSE_PROFILES:-}," in
+        *,vlai,*) ;;
+        *) return 0 ;;
+    esac
+
+    say "vlai"
+
+    printf '  classifier in the inspector catalog ... '
+    printf '\n== %s vlai\n' "$(date '+%F %T')" >> "$log_file"
+
+    if ! result=$(compose waf.yml exec -T controller \
+        node --input-type=module -e "$(cat "$here/bootstrap/vlai.mjs")" 2>> "$log_file"); then
+        printf 'failed\n'
+        log_tail
+        die "vlai catalog step failed, log: $log_file"
+    fi
+
+    printf '%s\n' "$result"
+}
+
 publish() {
     say "publish"
 
@@ -553,6 +575,7 @@ install_all() {
     migrate
     components
     panel
+    vlai_catalog
     publish
     say "done"
     health

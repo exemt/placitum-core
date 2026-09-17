@@ -87,4 +87,5 @@ the log for 14. At a constant 100 requests per second that is about 2.3 GB a day
 - Checked on KVM only.
 - Upgrades: a new version is a new machine.
 - External S3 instead of the local MinIO in the settings.
+- The `vlai` classifier: the image has neither its image nor the model.
 - HTTPS for the panel: over plain HTTP the password travels in clear text.
