@@ -3,7 +3,7 @@
 #
 #     ./install.sh check            checks only, changes nothing
 #     ./install.sh install          everything in order; the first run asks the settings
-#     ./install.sh reconfigure      ask the settings again and apply them
+#     ./install.sh reconfigure      ask the settings again and apply them; data stays
 #     ./install.sh infra            infrastructure only
 #     ./install.sh panel            set up the panel on a running installation
 #     ./install.sh panel-password   change the panel admin password and lift the login lockout
@@ -12,7 +12,7 @@
 #
 # Options:
 #     --sources <file>   component sources; default sources.env
-#     --no-build         start already built images without rebuilding
+#     --no-build         never build images: only what already has an image here
 #     --defaults         no questions: settings come from the environment or defaults
 #
 # Images are built on this machine from sources, so it needs access to the git
@@ -31,6 +31,8 @@ PLC_REVISION=${PLC_REVISION:-$(git -C "$here" rev-parse --short HEAD 2>/dev/null
 export PLC_VERSION PLC_REVISION
 build=yes
 defaults=no
+created=no
+absent=""
 # How the user runs this script: a ready machine image wraps it in its own command.
 cli=${PLC_CLI:-./install.sh}
 cmd=${1:-help}
@@ -288,10 +290,71 @@ ask_panel_password() {
     trap - EXIT INT TERM
 }
 
+# images_missing [all]: "service image" for every service of the answers whose image is not on this
+# machine; all adds vlai and haproxy whatever the answers.
+images_missing() {
+    profiles=""
+    [ "${1:-}" != all ] || profiles="--profile vlai --profile nodes"
+
+    # shellcheck disable=SC2086
+    compose waf.yml $profiles config --format json | awk '
+        function flush() {
+            if (service != "") print service, (image != "" ? image : project "-" service)
+            service = ""
+            image = ""
+        }
+        /^  "name": "/ { project = $2; gsub(/[",]/, "", project) }
+        /^  "services": \{/ { inside = 1; next }
+        inside && /^  [^ ]/ { flush(); inside = 0 }
+        inside && /^    "[^"]*": \{/ { flush(); service = $1; gsub(/[":]/, "", service) }
+        inside && /^      "image": "/ { image = $2; gsub(/[",]/, "", image) }
+    ' | while read -r service image; do
+        docker image inspect "$image" >/dev/null 2>&1 || printf '%s %s\n' "$service" "$image"
+    done
+}
+
+# .env as it was before this run; a file created by this run goes, so the next run asks again.
+restore_env() {
+    if [ "$created" = yes ]; then
+        rm -f "$env_file"
+    else
+        cat "$env_file.before" > "$env_file"
+    fi
+
+    rm -f "$env_file.before"
+}
+
+# A machine that does not build images needs an image for everything the answers run.
+check_images() {
+    [ "$build" = no ] || return 0
+
+    missing=$(images_missing | awk '{ printf "%s%s", sep, $1; sep = ", " }')
+    [ -z "$missing" ] || die "no image on this machine for $missing, and images are not built here; nothing changed"
+}
+
+# A running controller takes the inspectors of the answers into its catalog before anything else
+# changes: an inspector that routes still call stays, and the run stops.
+check_catalog() {
+    [ -n "$(compose waf.yml ps --status running -q controller 2>/dev/null)" ] || return 0
+
+    err=$(mktemp)
+
+    if ! result=$(layout_run catalog 2> "$err"); then
+        cat "$err" >> "$log_file"
+        why=$(sed -n 's/^Error: //p' "$err" | head -n 1)
+        rm -f "$err"
+        die "${why:-the inspector catalog refused the change}; nothing changed"
+    fi
+
+    rm -f "$err"
+    [ -z "$result" ] || printf '%s\n' "$result" | sed 's/^/  /'
+}
+
 prepare_env() {
     say "environment"
 
     setup=keep
+    created=no
 
     if [ ! -f "$env_file" ]; then
         cp "$here/.env.example" "$env_file"
@@ -302,6 +365,7 @@ prepare_env() {
         done
 
         setup=fresh
+        created=yes
         printf 'created %s with new infrastructure passwords\n' "$env_file"
     else
         printf 'environment file exists: %s\n' "$env_file"
@@ -309,8 +373,14 @@ prepare_env() {
 
     [ "$cmd" != reconfigure ] || setup=reconfigure
 
-    # The answers before this run: a refused change puts them back.
+    # The answers before this run: a run that stops before they are accepted puts them back.
     cp -p "$env_file" "$env_file.before"
+    trap restore_env EXIT
+    trap 'exit 130' INT TERM
+
+    if [ "$build" = no ]; then
+        absent=$(images_missing all)
+    fi
 
     # shellcheck disable=SC1090
     . "$env_file"
@@ -324,6 +394,10 @@ prepare_env() {
         # Not applied: the same questions again, with these answers in brackets.
         setup=reconfigure
     done
+
+    check_images
+    check_catalog
+    trap - EXIT INT TERM
 
     cpu_limits
 
@@ -548,6 +622,13 @@ settings() {
     ask PLC_NGINX_WORKERS is_workers auto "nginx processes per node: auto means one per core"
 
     for name in $INSPECTORS; do
+        eval "given=\${given_PLC_COPIES_$(upper "$name"):-}"
+
+        # A machine that does not build images does not ask about an inspector it has no image for.
+        if [ -z "$given" ] && printf '%s\n' "$absent" | grep -q "^inspector-$name "; then
+            continue
+        fi
+
         case "$name" in
             auth) ask PLC_COPIES_AUTH is_count  1 "Copies of the auth inspector: the panel login needs at least one" ;;
             vlai) ask PLC_COPIES_VLAI is_copies 0 "Copies of the vlai classifier, 0 is off: 4 GB more memory and a model download" ;;
@@ -692,22 +773,6 @@ migrate() {
 components() {
     say "components"
 
-    # A running controller checks the catalog first: an inspector that routes still call stays.
-    if [ -n "$(compose waf.yml ps --status running -q controller 2>/dev/null)" ]; then
-        err=$(mktemp)
-
-        if ! result=$(layout_run catalog 2> "$err"); then
-            cat "$err" >> "$log_file"
-            why=$(sed -n 's/^Error: //p' "$err" | head -n 1)
-            rm -f "$err"
-            cat "$env_file.before" > "$env_file"
-            die "${why:-the inspector catalog refused the change}; the answers stay as they were"
-        fi
-
-        rm -f "$err"
-        [ -z "$result" ] || printf '%s\n' "$result" | sed 's/^/  /'
-    fi
-
     # What the answers no longer run: vlai, haproxy for a single node, nodes beyond PLC_NODES.
     if [ "${PLC_COPIES_VLAI:-0}" -eq 0 ]; then
         compose waf.yml --profile vlai rm --stop --force inspector-vlai >> "$log_file" 2>&1 || true
@@ -725,11 +790,22 @@ components() {
         fi
     done
 
-    if [ "$build" = yes ]; then
-        quietly "image build (up to half an hour on the first install)" compose waf.yml build
-    fi
+    case "$build" in
+        yes)
+            quietly "image build (up to half an hour on the first install)" compose waf.yml build
+            ;;
+        missing)
+            # Only what the new answers turn on and this machine has no image for.
+            new=$(images_missing | awk '{ printf "%s%s", sep, $1; sep = " " }')
 
-    quietly "start and health check" compose waf.yml up -d --wait
+            if [ -n "$new" ]; then
+                # shellcheck disable=SC2086
+                quietly "image build: $new" compose waf.yml build $new
+            fi
+            ;;
+    esac
+
+    quietly "start and health check" compose waf.yml up -d --wait --no-build
 }
 
 panel() {
@@ -912,7 +988,8 @@ case "$cmd" in
         [ -f "$env_file" ] || die "$env_file not found: install first ($cli install)"
         [ "$interactive" = yes ] || [ "$defaults" = yes ] ||
             die "reconfigure asks on a terminal; without one, pass --defaults and set the new values in the environment"
-        build=no
+        # Images are built only for what the new answers turn on.
+        [ "$build" = no ] || build=missing
         install_all "Enter keeps the current one"
         ;;
     infra)
