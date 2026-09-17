@@ -44,6 +44,7 @@ services:
       args:
         <<: *build
         NGINX_VERSION: "${NGINX_VERSION:-1.28.0}"
+        NGINX_SHA256: "${NGINX_SHA256:-c6b5c6b086c0df9d3ca3ff5e084c1d0ef909e6038279c71c1c3e985f576ff76a}"
     hostname: ${PLC_NODE_ID:-edge-01}
     environment:
       <<: *bus
