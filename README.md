@@ -30,7 +30,8 @@ cd placitum-core
 ./install.sh install
 ```
 
-At the start the installer asks a few settings: node name, traffic ports, panel address and port.
+At the start the installer asks a few settings: node name, traffic addresses and ports, panel address
+and port, and the network for the containers.
 One more question opens the rest: nodes on this machine, nginx processes per node, copies of every
 inspector (0 turns one off) and Redis memory. Enter takes the value in brackets. The installer shows
 the plan and applies it after confirmation. Then it asks for the password of the panel user
@@ -48,7 +49,7 @@ and shows the end of the log. The full log is written to `install.log`.
 At the end the installer shows the addresses. By default:
 
 - panel: http://127.0.0.1:8081, user `admin`
-- application traffic: port 80
+- application traffic: ports 80 and 443 on every address of the machine
 - controller API: http://127.0.0.1:8080
 
 The panel is only reachable from the machine itself. From another machine, the easiest way is an SSH
@@ -88,10 +89,12 @@ describes every variable. The ones changed most often:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `PLC_TRAFFIC_BIND` | `0.0.0.0` | traffic addresses; `0.0.0.0` means all, or addresses of this machine separated by commas |
 | `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | ports for application traffic |
 | `PLC_PANEL_BIND` | `127.0.0.1` | machine address the panel listens on; `0.0.0.0` means all addresses |
 | `PLC_PANEL_PORT` | `8081` | panel port |
 | `PLC_NODE_ID` | `edge-01` | node name in the panel and the log |
+| `PLC_SUBNET` | a free network | network for the containers; it must not overlap the networks of the machine |
 | `PLC_INFRA_PORTS` | `none` | `loopback` opens the databases, NATS and MinIO on 127.0.0.1 for access from the machine |
 | `PLC_COOKIE_SECURE` | `off` | set to `on` once the node serves HTTPS |
 | `PLC_NODES` | `1` | protection nodes on this machine; more than one puts haproxy in front of them |
@@ -143,8 +146,9 @@ It is not reachable from outside.
 Placitum itself (`compose/waf.yml`):
 
 - `edge`: the protection node, nginx with the Placitum module. Application traffic and the panel go
-  through it. With `PLC_NODES` above one, `edge-02` and further nodes join it, and `balancer`
-  (haproxy) takes the traffic ports and passes connections to all of them.
+  through it. With `PLC_NODES` above one, `edge-02` and further nodes join it, and haproxy takes the
+  traffic ports and passes connections to all of them: on the machine itself in the machine image,
+  as the `balancer` container elsewhere.
 - `controller`: API and admin panel.
 - `logger` and `search`: event recording and search.
 - Inspectors that check requests: `ip`, `modsec`, `json`, `counter`, `action`, `rewrite`, `cookie`,

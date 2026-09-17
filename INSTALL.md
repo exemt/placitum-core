@@ -36,10 +36,11 @@ cd placitum-core
 1. **Checks**: Docker, Compose, `openssl`, disk space, the sources file.
 2. **Settings**: on the first run `.env` is created from `.env.example` with new random passwords
    for PostgreSQL, ClickHouse and MinIO, and the installer asks on a terminal: node name, traffic
-   ports, panel address and port. One more question opens nodes on this machine, nginx processes
-   per node, copies of every inspector and Redis memory. Enter takes the value in brackets. The
-   installer shows the plan and applies it after confirmation. CPU caps are lowered to the number
-   of cores.
+   addresses and ports (80 and 443 on every address by default), panel address and port, and the
+   installation network for the containers (the installer proposes a free one). One more question
+   opens nodes on this machine, nginx processes per node, copies of every inspector and Redis
+   memory. Enter takes the value in brackets. The installer shows the plan and applies it after
+   confirmation. CPU caps are lowered to the number of cores.
 3. **Secrets**: the installation key, archive credentials and four signing keys. The key
    fingerprint goes to `secrets/contour-pin.json`; the controller container mounts it read-only,
    and the panel checks the key from the API against it.
@@ -78,6 +79,10 @@ recreated, nodes and copies beyond the new numbers are removed, and the configur
 again. Only images that the new answers need and the machine lacks are built, such as haproxy for
 the second node. Data stays.
 
+A new installation network takes every container out of the old one and starts it in the new one;
+data stays. Docker rebuilds a network only when nothing else is attached to it, so a container of
+another project in it stops the change before anything happens.
+
 An inspector that routes or declarations still call is not turned off: the installer names the place
 and stops before anything changes. Without confirmation, after a refusal or an interrupt, `.env`
 stays as it was. Infrastructure passwords are not asked: they are set when the databases are
@@ -85,15 +90,22 @@ created.
 
 ### Several nodes on one machine
 
-With `PLC_NODES` above one, nodes `edge-02` and further run next to `edge`; the installer writes their
-definitions to `compose/nodes.yml` on every run. `balancer`, haproxy with its agent, takes the
-traffic ports and passes TCP connections to every node with PROXY protocol v2. The nodes terminate
-TLS themselves and see the real client address.
+With `PLC_NODES` above one, nodes `edge-02` and further run next to `edge`. haproxy takes the traffic
+ports and passes TCP connections to every node with PROXY protocol v2; the nodes terminate TLS
+themselves and see the real client address. Where the machine has the services `placitum-haproxy`
+and `placitum-haproxy-agent`, as the [machine image](image/README.md) does, haproxy runs on the
+machine itself; elsewhere it runs as the `balancer` container. Its agent takes the configuration
+from the controller over NATS either way.
 
-The installer turns PROXY protocol on for the ports `http-8080` and `https-8443` and trusts the client
-address from it only from the installation network. A traffic port created later in the panel needs
-PROXY protocol too. The panel stays on the first node. The haproxy configuration is on the panel
-page Configuration → haproxy; its entry points belong to the installer.
+The installer writes `compose/layout.yml` on every run: the installation network, fixed addresses and
+the traffic ports. NATS, the nodes and the haproxy container take fixed addresses at the start of the
+network, and haproxy reaches the nodes by them. PROXY protocol is on for the ports `http-8080` and
+`https-8443`, and the nodes trust it only from haproxy: its container address, or the network gateway
+for haproxy on the machine.
+
+A traffic port created later in the panel needs PROXY protocol too. The panel stays on the first
+node. The haproxy configuration is on the panel page Configuration → haproxy; its entry points
+belong to the installer.
 
 ## Configuration
 
@@ -102,10 +114,12 @@ page Configuration → haproxy; its entry points belong to the installer.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `COMPOSE_PROJECT_NAME` | `placitum` | compose project name; one for both files, otherwise the installer loses track of its own infrastructure |
-| `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | node ports on the host |
+| `PLC_TRAFFIC_BIND` | `0.0.0.0` | traffic addresses on the host: all of them, or addresses of this machine separated by commas |
+| `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | traffic ports on the host |
 | `PLC_PANEL_BIND` | `127.0.0.1` | IPv4 address of the machine the node serves the panel on: `127.0.0.1` for the machine only, an internal interface address for its network, `0.0.0.0` for all addresses |
 | `PLC_PANEL_PORT` | `8081` | panel port on that address |
 | `PLC_CONTROLLER_PORT` | `8080` | controller API without login, on `127.0.0.1` only |
+| `PLC_SUBNET` | a free network | installation network for the containers, /16 to /24; NATS, the nodes and the haproxy container take fixed addresses at its start, the other containers its upper half |
 | `PLC_NODE_ID` | `edge-01` | node name in the panel, heartbeat and audit |
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
 | `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
@@ -145,10 +159,10 @@ three monitoring sidecars. Each inspector runs in `PLC_COPIES_<INSPECTOR>` copie
 no copies does not run, and neither the panel nor routes see it. The text classifier `vlai` is off
 by default: with `PLC_COPIES_VLAI=1`, `./install.sh reconfigure` builds and starts it.
 
-Only the node is exposed: traffic (`PLC_HTTP_PORT`) and the panel (`PLC_PANEL_BIND`,
-`PLC_PANEL_PORT`). With several nodes the traffic ports belong to `balancer`. The controller is
-published on `127.0.0.1` only. Login forms, the captcha widget, search and `crypto` stay inside the
-network: only the node and the controller talk to them.
+Only traffic and the panel are exposed: the traffic ports on `PLC_TRAFFIC_BIND` and the panel on
+`PLC_PANEL_BIND`, `PLC_PANEL_PORT`. With several nodes the traffic ports belong to haproxy. The
+controller is published on `127.0.0.1` only. Login forms, the captcha widget, search and `crypto`
+stay inside the network: only the node and the controller talk to them.
 
 ## After installation
 
@@ -260,6 +274,9 @@ volume. There is no single upgrade command yet.
 
 - **Ports 80 and 443 are taken** by another service: the installation fails at the node. Give other
   ports when the installer asks, or later with `./install.sh reconfigure`.
+- **The installation network overlaps a network the machine reaches later**, such as a VPN route
+  added after the installation: containers lose that network. Choose another installation network
+  with `./install.sh reconfigure`.
 - **The node name lives in two places**: `PLC_NODE_ID` in `.env` and `waf_node_id` in
   `config/edge/node.conf`. `install.sh` keeps them in sync; if you edit by hand, edit both.
 - **Do not change `COMPOSE_PROJECT_NAME` on a running installation**: a new name means a new

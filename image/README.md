@@ -28,8 +28,9 @@ Debian and Docker packages are installed from their repositories.
 The first boot runs the installation on the console (tty1):
 
 1. A password for the `placitum` user. It logs in on the console and over SSH and has sudo.
-2. The installation settings: node name, traffic ports, panel address and port. One more question
-   opens nodes, nginx processes, inspector copies and Redis memory. Enter takes the value in
+2. The installation settings: node name, traffic addresses and ports, panel address and port, the
+   network for the containers. One more question opens nodes, nginx processes, inspector copies and
+   Redis memory. Enter takes the value in
    brackets. The panel address defaults to `0.0.0.0`, all addresses of the machine.
 3. The password of the panel user `admin`. Enter generates one and shows it once.
 
@@ -64,6 +65,10 @@ once it is read. SSH keys and users in that case come from cloud-init as usual.
 
 `placitum` runs `/opt/placitum/install.sh` and never builds images. Settings live in
 `/opt/placitum/.env`.
+
+With several nodes haproxy and its agent run on the machine itself, as the services
+`placitum-haproxy` and `placitum-haproxy-agent`: `placitum reconfigure` turns them on and off, and the
+agent takes the haproxy configuration from the controller.
 
 ## Sizing
 
