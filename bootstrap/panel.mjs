@@ -415,7 +415,7 @@ await locations(panel, [
   },
 ]);
 
-const form = datasets.find((row) => row.name === "login_form" && row.kind === "content");
+const form = datasets.find((row) => row.name === "panel_login" && row.kind === "content");
 
 await ensure(
   "login source panel",
