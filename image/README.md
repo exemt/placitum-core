@@ -28,9 +28,9 @@ Debian and Docker packages are installed from their repositories.
 The first boot runs the installation on the console (tty1):
 
 1. A password for the `placitum` user. It logs in on the console and over SSH and has sudo.
-2. The installation settings: node name, traffic ports, panel address and port, Redis memory.
-   Enter takes the value in brackets. The panel address defaults to `0.0.0.0`, all addresses of the
-   machine.
+2. The installation settings: node name, traffic ports, panel address and port. One more question
+   opens nodes, nginx processes, inspector copies and Redis memory. Enter takes the value in
+   brackets. The panel address defaults to `0.0.0.0`, all addresses of the machine.
 3. The password of the panel user `admin`. Enter generates one and shows it once.
 
 The images are already on the disk, so nothing is downloaded, and the installation takes about a
@@ -87,5 +87,6 @@ the log for 14. At a constant 100 requests per second that is about 2.3 GB a day
 - Checked on KVM only.
 - Upgrades: a new version is a new machine.
 - External S3 instead of the local MinIO in the settings.
-- The `vlai` classifier: the image has neither its image nor the model.
+- The `vlai` classifier: the image has neither its image nor the model, and the installation does
+  not offer it.
 - HTTPS for the panel: over plain HTTP the password travels in clear text.

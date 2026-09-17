@@ -36,8 +36,10 @@ cd placitum-core
 1. **Checks**: Docker, Compose, `openssl`, disk space, the sources file.
 2. **Settings**: on the first run `.env` is created from `.env.example` with new random passwords
    for PostgreSQL, ClickHouse and MinIO, and the installer asks on a terminal: node name, traffic
-   ports, panel address and port, Redis memory. Enter takes the value in brackets. CPU caps are
-   lowered to the number of cores.
+   ports, panel address and port. One more question opens nodes on this machine, nginx processes
+   per node, copies of every inspector and Redis memory. Enter takes the value in brackets. The
+   installer shows the plan and applies it after confirmation. CPU caps are lowered to the number
+   of cores.
 3. **Secrets**: the installation key, archive credentials and four signing keys. The key
    fingerprint goes to `secrets/contour-pin.json`; the controller container mounts it read-only,
    and the panel checks the key from the API against it.
@@ -47,10 +49,12 @@ cd placitum-core
 6. **Components**: images are built from `sources.env` and started.
 7. **Panel**: the `panel` server on the node behind the `auth` login gate, and the `admin` user.
    The password is asked right after the settings, before the build (see [Panel](#panel)).
-8. **Delivery**: all configuration channels are published to the processes, and the step waits for
+8. **Layout**: running inspectors in the catalog, nginx processes per node, traffic ports and, with
+   several nodes, haproxy in front of them.
+9. **Delivery**: all configuration channels are published to the processes, and the step waits for
    their reports. Otherwise a fresh installation runs on image defaults and the panel shows a
    mismatch.
-9. **Summary**: container health in one line, the panel, API and traffic addresses.
+10. **Summary**: container health in one line, the panel, API and traffic addresses.
 
 Each step leaves one line with its result and time on screen. The full build and compose output
 goes to `install.log` next to `install.sh`; on failure the installer shows its tail.
@@ -68,9 +72,28 @@ PLC_NODE_ID=edge-02 PLC_PANEL_BIND=10.0.0.5 PLC_PANEL_PASSWORD=… ./install.sh 
 ./install.sh reconfigure
 ```
 
-The same questions with the current values in brackets. Then the installation runs again without
-the build: containers whose settings changed are recreated, and the configuration is published
-again. Infrastructure passwords are not asked: they are set when the databases are created.
+The same questions with the current values in brackets. The installer shows the plan and what
+changes, and after confirmation runs the installation again: containers whose settings changed are
+recreated, nodes and copies beyond the new numbers are removed, and the configuration is published
+again. Only images that the new answers need and the machine lacks are built, such as haproxy for
+the second node. Data stays.
+
+An inspector that routes or declarations still call is not turned off: the installer names the place
+and stops before anything changes. Without confirmation, after a refusal or an interrupt, `.env`
+stays as it was. Infrastructure passwords are not asked: they are set when the databases are
+created.
+
+### Several nodes on one machine
+
+With `PLC_NODES` above one, nodes `edge-02` and further run next to `edge`; the installer writes their
+definitions to `compose/nodes.yml` on every run. `balancer`, haproxy with its agent, takes the
+traffic ports and passes TCP connections to every node with PROXY protocol v2. The nodes terminate
+TLS themselves and see the real client address.
+
+The installer turns PROXY protocol on for the ports `http-8080` and `https-8443` and trusts the client
+address from it only from the installation network. A traffic port created later in the panel needs
+PROXY protocol too. The panel stays on the first node. The haproxy configuration is on the panel
+page Configuration → haproxy; its entry points belong to the installer.
 
 ## Configuration
 
@@ -87,7 +110,11 @@ again. Infrastructure passwords are not asked: they are set when the databases a
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
 | `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
 | `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the exchange Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
+| `PLC_NODES` | `1` | protection nodes on this machine; more than one puts haproxy in front of them |
+| `PLC_NGINX_WORKERS` | `auto` | nginx processes per node, set in the panel by the installer |
+| `PLC_COPIES_<INSPECTOR>` | `1`, `0` for `VLAI` | copies of each inspector; 0 turns it off, `AUTH` needs at least one for the panel login |
 | `PLC_CPUS`, `PLC_CPUS_NATS`, `PLC_CPUS_KEEPER` | `2`, `6`, `4` | CPU cap per service, for NATS and for keeper; the installer lowers them to the number of cores |
+| `PLC_CPUS_EDGE` | nginx processes | CPU cap of a node |
 | `NGINX_VERSION` | `1.28.0` | nginx version for the module and the base image; change both together |
 
 ### `sources.env`
@@ -114,14 +141,14 @@ and does nothing else.
 Eight infrastructure services and Placitum itself: the protection node, the controller with the
 panel, logger and search, `crypto`, `geo`, `keeper`, nine inspectors (`ip`, `modsec`, `json`,
 `counter`, `action`, `rewrite`, `cookie`, `auth` with the login form, `captcha` with the widget) and
-three monitoring sidecars. The text classifier `vlai` is behind a compose profile. To run it, add
-`COMPOSE_PROFILES=vlai` to `.env` and run `./install.sh install` again: the installer builds and
-starts the classifier and adds it to the inspector catalog. Without the profile the catalog has no
-`vlai`, so routes cannot call a process that does not run.
+three monitoring sidecars. Each inspector runs in `PLC_COPIES_<INSPECTOR>` copies; an inspector with
+no copies does not run, and neither the panel nor routes see it. The text classifier `vlai` is off
+by default: with `PLC_COPIES_VLAI=1`, `./install.sh reconfigure` builds and starts it.
 
 Only the node is exposed: traffic (`PLC_HTTP_PORT`) and the panel (`PLC_PANEL_BIND`,
-`PLC_PANEL_PORT`). The controller is published on `127.0.0.1` only. Login forms, the captcha widget,
-search and `crypto` stay inside the network: only the node and the controller talk to them.
+`PLC_PANEL_PORT`). With several nodes the traffic ports belong to `balancer`. The controller is
+published on `127.0.0.1` only. Login forms, the captcha widget, search and `crypto` stay inside the
+network: only the node and the controller talk to them.
 
 ## After installation
 

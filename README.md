@@ -30,8 +30,10 @@ cd placitum-core
 ./install.sh install
 ```
 
-At the start the installer asks a few settings: node name, traffic ports, panel address and port,
-Redis memory. Enter takes the value in brackets. Then it asks for the password of the panel user
+At the start the installer asks a few settings: node name, traffic ports, panel address and port.
+One more question opens the rest: nodes on this machine, nginx processes per node, copies of every
+inspector (0 turns one off) and Redis memory. Enter takes the value in brackets. The installer shows
+the plan and applies it after confirmation. Then it asks for the password of the panel user
 `admin`. You can just press Enter: a password is generated and shown once near the end of the
 installation. It is not stored in plain text anywhere. Without a terminal, pass the password in
 `PLC_PANEL_PASSWORD` and the settings in the environment, see [INSTALL.md](INSTALL.md#installing).
@@ -75,9 +77,9 @@ route and check that traffic goes through Placitum is described in
 | `./install.sh infra` | brings up the infrastructure only |
 | `./install.sh down` | stops everything; data stays |
 
-Options: `--no-build` starts already built images without rebuilding, `--sources <file>` takes
-component sources from another file, `--defaults` asks nothing and takes settings from the
-environment or defaults.
+Options: `--no-build` never builds images and does not offer what has no image on the machine,
+`--sources <file>` takes component sources from another file, `--defaults` asks nothing and takes
+settings from the environment or defaults.
 
 ## Configuration
 
@@ -92,9 +94,13 @@ describes every variable. The ones changed most often:
 | `PLC_NODE_ID` | `edge-01` | node name in the panel and the log |
 | `PLC_INFRA_PORTS` | `none` | `loopback` opens the databases, NATS and MinIO on 127.0.0.1 for access from the machine |
 | `PLC_COOKIE_SECURE` | `off` | set to `on` once the node serves HTTPS |
+| `PLC_NODES` | `1` | protection nodes on this machine; more than one puts haproxy in front of them |
+| `PLC_NGINX_WORKERS` | `auto` | nginx processes per node |
+| `PLC_COPIES_<INSPECTOR>` | `1`, `0` for vlai | copies of each inspector; 0 turns it off |
 | `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | by machine memory | memory of the two Redis instances, MB |
 
-`./install.sh reconfigure` changes the asked settings and recreates the containers they affect.
+`./install.sh reconfigure` asks the settings again, shows what changes and applies it to the running
+installation: nodes, inspectors and processes are added or removed without losing data.
 
 ## Where components come from
 
@@ -137,14 +143,16 @@ It is not reachable from outside.
 Placitum itself (`compose/waf.yml`):
 
 - `edge`: the protection node, nginx with the Placitum module. Application traffic and the panel go
-  through it.
+  through it. With `PLC_NODES` above one, `edge-02` and further nodes join it, and `balancer`
+  (haproxy) takes the traffic ports and passes connections to all of them.
 - `controller`: API and admin panel.
 - `logger` and `search`: event recording and search.
 - Inspectors that check requests: `ip`, `modsec`, `json`, `counter`, `action`, `rewrite`, `cookie`,
-  `auth` (login form) and `captcha`.
+  `auth` (login form) and `captcha`. Each one runs in as many copies as its setting says; one that is
+  off is not in the panel either.
 - Service components `crypto`, `geo`, `keeper` and agents that watch Redis and MinIO.
-- `vlai`: the text classifier. It does not start by default: it is heavy and downloads a model on
-  first start. How to enable it is described in [INSTALL.md](INSTALL.md#what-runs).
+- `vlai`: the text classifier. It is off by default: it is heavy and downloads a model on first
+  start. `PLC_COPIES_VLAI=1` turns it on.
 
 Services set up their database schemas themselves on start: ClickHouse by `logger`, PostgreSQL by
 `controller` on an empty database.
@@ -179,7 +187,7 @@ secrets/        installation keys, not in git
 
 ## Not there yet
 
-- Several protection nodes behind a load balancer: there is one node for now.
+- Nodes on other machines: several nodes run on one machine only.
 - Upgrades with a single command.
 - Prebuilt images in a registry: the installer builds from sources, only the virtual machine image
   carries built images.
