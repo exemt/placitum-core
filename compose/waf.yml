@@ -38,6 +38,7 @@ services:
   # Protection node: nginx with the module and the agent; serves 503 on :8079 until the first generation.
   edge:
     <<: *resources
+    cpus: "${PLC_CPUS_EDGE:-2}"
     build:
       context: ${PLC_SRC_NGINX:?set it in sources.env}
       dockerfile: managed/Dockerfile
@@ -226,6 +227,8 @@ services:
 
   inspector-ip:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_IP:-1}
     build:
       context: ${PLC_SRC_IP:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -239,6 +242,8 @@ services:
 
   inspector-modsec:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_MODSEC:-1}
     build:
       context: ${PLC_SRC_MODSEC:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -252,6 +257,8 @@ services:
 
   inspector-json:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_JSON:-1}
     build:
       context: ${PLC_SRC_JSON:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -265,6 +272,8 @@ services:
 
   inspector-counter:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_COUNTER:-1}
     build:
       context: ${PLC_SRC_COUNTER:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -278,6 +287,8 @@ services:
 
   inspector-action:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_ACTION:-1}
     build:
       context: ${PLC_SRC_ACTION:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -291,6 +302,8 @@ services:
 
   inspector-rewrite:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_REWRITE:-1}
     build:
       context: ${PLC_SRC_REWRITE:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -303,6 +316,8 @@ services:
 
   inspector-auth:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_AUTH:-1}
     build:
       context: ${PLC_SRC_AUTH:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -352,6 +367,8 @@ services:
 
   inspector-captcha:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_CAPTCHA:-1}
     build:
       context: ${PLC_SRC_CAPTCHA:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -370,6 +387,9 @@ services:
 
   captcha-http:
     <<: *resources
+    # install.sh turns the form off together with the captcha inspector.
+    deploy:
+      replicas: ${PLC_CAPTCHA_FORM:-1}
     image: placitum/captcha
     command: ["captcha-http"]
     environment:
@@ -399,6 +419,8 @@ services:
 
   inspector-cookie:
     <<: *inspector
+    deploy:
+      replicas: ${PLC_COPIES_COOKIE:-1}
     build:
       context: ${PLC_SRC_COOKIE:?set it in sources.env}
       dockerfile: deploy/Dockerfile
@@ -414,10 +436,12 @@ services:
     secrets:
       - waf_cookie_hmac
 
-  # Heavy, downloads model weights on first start. COMPOSE_PROFILES=vlai in .env enables it, and
-  # install.sh adds it to the inspector catalog.
+  # Heavy, downloads model weights on first start: install.sh turns the profile on when
+  # PLC_COPIES_VLAI is above zero, so an installation without it never builds the image.
   inspector-vlai:
     profiles: ["vlai"]
+    deploy:
+      replicas: ${PLC_COPIES_VLAI:-1}
     cpus: "${PLC_CPUS:-2}"
     mem_limit: 4g
     restart: unless-stopped
@@ -478,6 +502,31 @@ services:
       nats:
         condition: service_healthy
 
+  # Several nodes on one machine: haproxy takes the traffic ports and passes connections to the
+  # nodes with PROXY protocol, its configuration comes from the controller. install.sh turns the
+  # profile on when PLC_NODES is above one.
+  balancer:
+    profiles: ["nodes"]
+    <<: *resources
+    build:
+      context: ${PLC_SRC_HAPROXY_AGENT:?set it in sources.env}
+      args: *build
+    image: placitum/agents-haproxy
+    hostname: balancer
+    environment:
+      WAF_NATS_URL: nats://nats:4222
+      WAF_HAPROXY_AGENT_LOG: info
+    ports:
+      - "${PLC_HTTP_PORT:-80}:8080"
+      - "${PLC_HTTPS_PORT:-443}:8443"
+    volumes:
+      - balancer-data:/var/lib/waf/agent
+    depends_on:
+      nats:
+        condition: service_healthy
+      edge:
+        condition: service_started
+
   s3-agent:
     <<: *resources
     build:
@@ -510,6 +559,7 @@ volumes:
   redis-agent-data:
   redis-internal-agent-data:
   s3-agent-data:
+  balancer-data:
 
 # Created by ../install.sh (bootstrap/secrets.sh); not in git.
 secrets:

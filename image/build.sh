@@ -95,7 +95,8 @@ compose() {
 
 # Built images get names of their own, so the build does not retag images this
 # host already uses. On the machine they get their installation names back.
-compose config --format json > "$work/compose.json"
+# haproxy for several nodes goes into the image too; vlai does not.
+compose --profile nodes config --format json > "$work/compose.json"
 
 python3 - "$work/compose.json" "$work/names.yml" "$work/retag.txt" "$work/images.txt" <<'EOF'
 import json, sys
@@ -104,7 +105,7 @@ cfg = json.load(open(sys.argv[1]))
 names, retag, images = [], [], set()
 
 for service, spec in sorted(cfg["services"].items()):
-    if spec.get("profiles"):
+    if "vlai" in (spec.get("profiles") or []):
         continue
     if "build" in spec:
         built = f"placitum-image/{service}"
@@ -120,7 +121,7 @@ open(sys.argv[4], "w").write("".join(f"{i}\n" for i in sorted(images)))
 EOF
 
 PLC_VERSION=${PLC_VERSION:-dev} PLC_REVISION=$revision \
-    compose -f "$work/names.yml" build > "$work/build.log" 2>&1 ||
+    compose --profile nodes -f "$work/names.yml" build > "$work/build.log" 2>&1 ||
     die "image build failed, log: $work/build.log"
 
 while read -r image; do

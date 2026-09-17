@@ -45,9 +45,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+INSPECTORS="ip modsec json counter action rewrite cookie captcha auth vlai"
+
 # Asked on the first install and by reconfigure. A value set in the environment
 # becomes the default answer.
-SETTINGS="PLC_NODE_ID PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_REDIS_EXCHANGE_MB PLC_REDIS_INTERNAL_MB"
+SETTINGS="PLC_NODE_ID PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_NODES PLC_NGINX_WORKERS"
+
+for name in $INSPECTORS; do
+    SETTINGS="$SETTINGS PLC_COPIES_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+done
+
+SETTINGS="$SETTINGS PLC_REDIS_EXCHANGE_MB PLC_REDIS_INTERNAL_MB"
 
 for name in $SETTINGS; do
     eval "given_$name=\${$name:-}"
@@ -62,11 +70,43 @@ say()  { printf '\n== %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf '!! %s\n' "$*" >&2; exit 1; }
 
+upper() {
+    printf '%s' "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+# Compose with the values that follow from the answers: the vlai profile, the captcha form and the
+# CPU cap of a node.
 compose() {
     file=$1
     shift
-    docker compose --ansi never --progress plain \
-        --env-file "$env_file" --env-file "$sources" -f "$here/compose/$file" "$@"
+    (
+        if [ -f "$env_file" ]; then
+            # shellcheck disable=SC1090
+            . "$env_file"
+        fi
+
+        cores=$(nproc 2>/dev/null || echo 1)
+        edge=${PLC_CPUS_EDGE:-${PLC_NGINX_WORKERS:-auto}}
+        [ "$edge" != auto ] || edge=$cores
+        awk -v v="$edge" -v c="$cores" 'BEGIN { exit !(v > c) }' && edge=$cores
+
+        COMPOSE_PROFILES=""
+        [ "${PLC_COPIES_VLAI:-0}" -eq 0 ] || COMPOSE_PROFILES=vlai
+        [ "${PLC_NODES:-1}" -le 1 ] || COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}nodes"
+        PLC_CAPTCHA_FORM=1
+        [ "${PLC_COPIES_CAPTCHA:-1}" -gt 0 ] || PLC_CAPTCHA_FORM=0
+        PLC_CPUS_EDGE=$edge
+        export COMPOSE_PROFILES PLC_CAPTCHA_FORM PLC_CPUS_EDGE
+
+        if [ -f "$here/compose/nodes.yml" ]; then
+            set -- -f "$here/compose/$file" -f "$here/compose/nodes.yml" "$@"
+        else
+            set -- -f "$here/compose/$file" "$@"
+        fi
+
+        exec docker compose --ansi never --progress plain \
+            --env-file "$env_file" --env-file "$sources" "$@"
+    )
 }
 
 elapsed() {
@@ -271,7 +311,17 @@ prepare_env() {
 
     # shellcheck disable=SC1090
     . "$env_file"
-    settings
+    before=$(snapshot)
+
+    while :; do
+        settings
+        plan
+        [ "$setup" != reconfigure ] || changes "$before"
+        [ "$setup" = keep ] || confirm && break
+        # Not applied: the same questions again, with these answers in brackets.
+        setup=reconfigure
+    done
+
     cpu_limits
 
     # shellcheck disable=SC1090
@@ -279,11 +329,90 @@ prepare_env() {
     quietly "keys and secrets" env MINIO_ROOT_USER="${MINIO_ROOT_USER:-waf}" \
         MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-wafwafwaf}" sh "$here/bootstrap/secrets.sh"
 
-    node_id=${PLC_NODE_ID:-edge-01}
-    printf '%s\n' \
-        "# Node name for the module; install.sh rewrites this file from PLC_NODE_ID." \
-        "waf_node_id $node_id;" > "$here/config/edge/node.conf"
-    printf 'node: %s\n' "$node_id"
+    node_files
+}
+
+# node_name <n>: node n takes the number at the end of PLC_NODE_ID, edge-01 gives edge-02.
+node_name() {
+    id=${PLC_NODE_ID:-edge-01}
+
+    if [ "$1" -eq 1 ]; then
+        printf '%s' "$id"
+        return 0
+    fi
+
+    digits=$(printf '%s' "$id" | sed -n 's/^.*-\([0-9][0-9]*\)$/\1/p')
+
+    if [ -z "$digits" ]; then
+        printf '%s-%s' "$id" "$1"
+    else
+        awk -v p="${id%"$digits"}" -v w="${#digits}" -v n="$1" 'BEGIN { printf "%s%0" w "d", p, n }'
+    fi
+}
+
+# node.conf of every node and compose/nodes.yml with the nodes after the first, rebuilt from the
+# answers on every run.
+node_files() {
+    count=${PLC_NODES:-1}
+    nodes="$here/compose/nodes.yml"
+
+    rm -f "$here"/config/edge/node-*.conf
+
+    i=1
+    while [ "$i" -le "$count" ]; do
+        conf="$here/config/edge/node.conf"
+        [ "$i" -eq 1 ] || conf="$here/config/edge/node-$(printf '%02d' "$i").conf"
+
+        printf '%s\n' \
+            "# Node name for the module; install.sh rewrites this file from PLC_NODE_ID." \
+            "waf_node_id $(node_name "$i");" > "$conf"
+        i=$((i + 1))
+    done
+
+    printf 'nodes: %s' "$(node_name 1)"
+    [ "$count" -eq 1 ] || printf ' ... %s' "$(node_name "$count")"
+    printf '\n'
+
+    if [ "$count" -eq 1 ]; then
+        rm -f "$nodes"
+        return 0
+    fi
+
+    {
+        printf '# Written by install.sh from PLC_NODES: changes here are lost on the next run.\n\n'
+        printf 'services:\n'
+        printf '  edge:\n'
+        printf '    ports: !override\n'
+        printf '      - "${PLC_PANEL_BIND:-127.0.0.1}:${PLC_PANEL_PORT:-8081}:8081"\n'
+
+        i=2
+        while [ "$i" -le "$count" ]; do
+            n=$(printf '%02d' "$i")
+            name=$(node_name "$i")
+
+            printf '\n  edge-%s:\n' "$n"
+            printf '    extends:\n      file: waf.yml\n      service: edge\n'
+            printf '    build: !reset null\n'
+            printf '    image: placitum-edge\n'
+            printf '    hostname: %s\n' "$name"
+            printf '    labels:\n      placitum.install: node\n'
+            printf '    environment:\n      WAF_NODE_ID: %s\n' "$name"
+            printf '    ports: !reset []\n'
+            printf '    volumes:\n'
+            printf '      - ../config/edge/node-%s.conf:/etc/nginx/waf-node.conf:ro\n' "$n"
+            printf '      - edge-%s-data:/var/lib/waf/agent\n' "$n"
+            printf '      - edge-%s-store:/var/lib/waf/store\n' "$n"
+            i=$((i + 1))
+        done
+
+        printf '\nvolumes:\n'
+
+        i=2
+        while [ "$i" -le "$count" ]; do
+            printf '  edge-%s-data:\n  edge-%s-store:\n' "$(printf '%02d' "$i")" "$(printf '%02d' "$i")"
+            i=$((i + 1))
+        done
+    } > "$nodes"
 }
 
 set_env() {
@@ -298,9 +427,15 @@ set_env() {
     fi
 }
 
-is_name() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$'; }
-is_mb()   { printf '%s' "$1" | grep -Eq '^[0-9]{2,6}$' && [ "$1" -ge 64 ]; }
-is_port() { printf '%s' "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+is_name()   { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$'; }
+is_mb()     { printf '%s' "$1" | grep -Eq '^[0-9]{2,6}$' && [ "$1" -ge 64 ]; }
+is_port()   { printf '%s' "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+is_count()  { printf '%s' "$1" | grep -Eq '^[0-9]{1,2}$' && [ "$1" -ge 1 ] && [ "$1" -le 32 ]; }
+is_copies() { printf '%s' "$1" | grep -Eq '^[0-9]{1,2}$' && [ "$1" -le 32 ]; }
+
+is_workers() {
+    [ "$1" = auto ] || { printf '%s' "$1" | grep -Eq '^[0-9]{1,3}$' && [ "$1" -ge 1 ] && [ "$1" -le 256 ]; }
+}
 
 is_http_port()  { is_port "$1" && [ "$1" != "${PLC_CONTROLLER_PORT:-8080}" ]; }
 is_https_port() { is_http_port "$1" && [ "$1" != "${PLC_HTTP_PORT:-}" ]; }
@@ -320,6 +455,9 @@ why() {
     case "$1" in
         is_name)       echo "lowercase latin letters, digits and hyphens" ;;
         is_mb)         echo "megabytes, at least 64" ;;
+        is_count)      echo "a number from 1 to 32" ;;
+        is_copies)     echo "a number from 0 to 32; 0 turns the inspector off" ;;
+        is_workers)    echo "auto or a number from 1 to 256" ;;
         is_http_port)  echo "a port from 1 to 65535, not the controller API port" ;;
         is_https_port) echo "a port from 1 to 65535, not the HTTP port or the controller API port" ;;
         is_panel_port) echo "a port from 1 to 65535, not a traffic port or the controller API port" ;;
@@ -391,8 +529,128 @@ settings() {
     ask PLC_PANEL_BIND is_bind       127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
     ask PLC_PANEL_PORT is_panel_port 8081      "Panel port"
 
+    # Nodes, inspectors and memory come with values that suit most machines.
+    asked=$interactive
+
+    if [ "$setup" != keep ] && [ "$interactive" = yes ]; then
+        printf 'Change nodes, nginx processes, inspectors and Redis memory? [y/N]: '
+        IFS= read -r reply || reply=""
+        case "$reply" in
+            y|Y|yes) ;;
+            *) interactive=no ;;
+        esac
+    fi
+
+    ask PLC_NODES         is_count   1    "Protection nodes on this machine, each nginx with its agent"
+    ask PLC_NGINX_WORKERS is_workers auto "nginx processes per node: auto means one per core"
+
+    for name in $INSPECTORS; do
+        case "$name" in
+            auth) ask PLC_COPIES_AUTH is_count  1 "Copies of the auth inspector: the panel login needs at least one" ;;
+            vlai) ask PLC_COPIES_VLAI is_copies 0 "Copies of the vlai classifier, 0 is off: 4 GB more memory and a model download" ;;
+            *)    ask "PLC_COPIES_$(upper "$name")" is_copies 1 "Copies of the $name inspector, 0 is off" ;;
+        esac
+    done
+
     ask PLC_REDIS_EXCHANGE_MB is_mb "$exchange" "Exchange Redis memory, MB: request objects waiting for a verdict"
     ask PLC_REDIS_INTERNAL_MB is_mb "$internal" "Internal Redis memory, MB: configuration and inspector state"
+
+    interactive=$asked
+}
+
+label() {
+    case "$1" in
+        PLC_NODE_ID)           echo "node name" ;;
+        PLC_HTTP_PORT)         echo "HTTP port" ;;
+        PLC_HTTPS_PORT)        echo "HTTPS port" ;;
+        PLC_PANEL_BIND)        echo "panel address" ;;
+        PLC_PANEL_PORT)        echo "panel port" ;;
+        PLC_NODES)             echo "nodes" ;;
+        PLC_NGINX_WORKERS)     echo "nginx processes per node" ;;
+        PLC_REDIS_EXCHANGE_MB) echo "exchange Redis, MB" ;;
+        PLC_REDIS_INTERNAL_MB) echo "internal Redis, MB" ;;
+        PLC_COPIES_*)          printf '%s copies\n' "$(printf '%s' "${1#PLC_COPIES_}" | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+}
+
+snapshot() {
+    for name in $SETTINGS; do
+        eval "printf '%s=%s\\n' \"\$name\" \"\${$name:-}\""
+    done
+}
+
+# plan: what the answers install; changes <snapshot>: what differs from it.
+plan() {
+    say "plan"
+
+    workers=${PLC_NGINX_WORKERS:-auto}
+
+    if [ "${PLC_NODES:-1}" -gt 1 ]; then
+        printf '  nodes        %s from %s, %s nginx processes each, haproxy in front on ports %s and %s\n' \
+            "$PLC_NODES" "$PLC_NODE_ID" "$workers" "$PLC_HTTP_PORT" "$PLC_HTTPS_PORT"
+    else
+        printf '  node         %s, %s nginx processes, ports %s and %s\n' \
+            "$PLC_NODE_ID" "$workers" "$PLC_HTTP_PORT" "$PLC_HTTPS_PORT"
+    fi
+
+    printf '  panel        %s:%s\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
+
+    on=""
+    off=""
+
+    for name in $INSPECTORS; do
+        default=1
+        [ "$name" != vlai ] || default=0
+        eval "copies=\${PLC_COPIES_$(upper "$name"):-$default}"
+
+        if [ "$copies" -eq 0 ]; then
+            off="$off $name"
+        elif [ "$copies" -eq 1 ]; then
+            on="$on $name"
+        else
+            on="$on $name x$copies"
+        fi
+    done
+
+    printf '  inspectors  %s\n' "$on"
+    [ -z "$off" ] || printf '  off         %s\n' "$off"
+    printf '  Redis        exchange %s MB, internal %s MB\n' "$PLC_REDIS_EXCHANGE_MB" "$PLC_REDIS_INTERNAL_MB"
+
+    cores=$(nproc 2>/dev/null || echo 1)
+
+    if [ "$workers" != auto ] && [ $((PLC_NODES * workers)) -gt "$cores" ]; then
+        warn "$PLC_NODES nodes x $workers nginx processes is more than the $cores cores of this machine"
+    fi
+}
+
+changes() {
+    shown=no
+
+    for name in $SETTINGS; do
+        old=$(printf '%s\n' "$1" | sed -n "s/^$name=//p")
+        eval "new=\${$name:-}"
+        [ "$old" != "$new" ] || continue
+
+        if [ "$shown" = no ]; then
+            say "changes"
+            shown=yes
+        fi
+
+        printf '  %-28s %s -> %s\n' "$(label "$name")" "${old:-none}" "$new"
+    done
+
+    [ "$shown" = yes ] || printf '\nno changes\n'
+}
+
+confirm() {
+    [ "$interactive" = yes ] || return 0
+
+    printf '\nApply? [Y/n]: '
+    IFS= read -r reply || reply=""
+
+    case "$reply" in
+        n|N|no) return 1 ;;
+    esac
 }
 
 # Docker refuses a CPU cap above the number of cores: caps are lowered to fit this machine.
@@ -430,6 +688,32 @@ migrate() {
 
 components() {
     say "components"
+
+    # A running controller checks the catalog first: an inspector that routes still call stays.
+    if [ -n "$(compose waf.yml ps --status running -q controller 2>/dev/null)" ]; then
+        if ! result=$(layout_run catalog 2>> "$log_file"); then
+            log_tail
+            die "inspectors not changed, log: $log_file"
+        fi
+        [ -z "$result" ] || printf '%s\n' "$result" | sed 's/^/  /'
+    fi
+
+    # What the answers no longer run: vlai, haproxy for a single node, nodes beyond PLC_NODES.
+    if [ "${PLC_COPIES_VLAI:-0}" -eq 0 ]; then
+        compose waf.yml --profile vlai rm --stop --force inspector-vlai >> "$log_file" 2>&1 || true
+    fi
+
+    if [ "${PLC_NODES:-1}" -le 1 ]; then
+        compose waf.yml --profile nodes rm --stop --force balancer >> "$log_file" 2>&1 || true
+    fi
+
+    docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-placitum}" \
+        --filter label=placitum.install=node --format '{{.ID}} {{.Label "com.docker.compose.service"}}' |
+    while read -r id service; do
+        if [ "${service#edge-}" -gt "${PLC_NODES:-1}" ] 2>/dev/null; then
+            docker rm -f "$id" >> "$log_file" 2>&1
+        fi
+    done
 
     if [ "$build" = yes ]; then
         quietly "image build (up to half an hour on the first install)" compose waf.yml build
@@ -479,26 +763,49 @@ panel() {
     esac
 }
 
-# The vlai classifier runs only with its compose profile, and only then is it in the inspector catalog.
-vlai_catalog() {
-    case ",${COMPOSE_PROFILES:-}," in
-        *,vlai,*) ;;
-        *) return 0 ;;
-    esac
+# layout.mjs in the controller with the answers: inspectors, nginx processes, nodes behind haproxy.
+layout_run() {
+    nodes=""
+    inspectors=""
+    i=1
 
-    say "vlai"
+    while [ "$i" -le "${PLC_NODES:-1}" ]; do
+        service=edge
+        [ "$i" -eq 1 ] || service="edge-$(printf '%02d' "$i")"
+        nodes="$nodes $service:$(node_name "$i")"
+        i=$((i + 1))
+    done
 
-    printf '  classifier in the inspector catalog ... '
-    printf '\n== %s vlai\n' "$(date '+%F %T')" >> "$log_file"
+    for name in $INSPECTORS; do
+        default=1
+        [ "$name" != vlai ] || default=0
+        eval "copies=\${PLC_COPIES_$(upper "$name"):-$default}"
+        [ "$copies" -eq 0 ] || inspectors="$inspectors $name"
+    done
 
-    if ! result=$(compose waf.yml exec -T controller \
-        node --input-type=module -e "$(cat "$here/bootstrap/vlai.mjs")" 2>> "$log_file"); then
+    compose waf.yml exec -T \
+        -e "LAYOUT_STEP=$1" \
+        -e "LAYOUT_INSPECTORS=${inspectors# }" \
+        -e "LAYOUT_WORKERS=${PLC_NGINX_WORKERS:-auto}" \
+        -e "LAYOUT_NODES=${nodes# }" \
+        controller node --input-type=module -e "$(cat "$here/bootstrap/layout.mjs")"
+}
+
+layout() {
+    say "layout"
+
+    started=$(date +%s)
+    printf '  inspectors, nginx processes, ports, haproxy ... '
+    printf '\n== %s layout\n' "$(date '+%F %T')" >> "$log_file"
+
+    if ! result=$(layout_run all 2>> "$log_file"); then
         printf 'failed\n'
         log_tail
-        die "vlai catalog step failed, log: $log_file"
+        die "layout step failed, log: $log_file"
     fi
 
-    printf '%s\n' "$result"
+    printf 'done, %s\n' "$(elapsed "$started")"
+    [ -z "$result" ] || printf '%s\n' "$result" | sed 's/^/  /'
 }
 
 publish() {
@@ -575,7 +882,7 @@ install_all() {
     migrate
     components
     panel
-    vlai_catalog
+    layout
     publish
     say "done"
     health
