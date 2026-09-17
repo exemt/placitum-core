@@ -6,8 +6,9 @@
 #     sh image/build.sh                    image/work/placitum-<revision>.qcow2
 #     sh image/build.sh --sources <file>   other component sources
 #
-# BUILD_PARALLEL=<n> builds at most n component images at a time: slower, but a small machine
-# does not overheat. VM_CPUS sets the cores of the build machine (4).
+# BUILD_ONE_BY_ONE=1 builds the component images one after another instead of all at once, and
+# BUILD_PAUSE runs a command before each of them, such as a wait until the processor cools down:
+# slower, but a small machine does not overheat. VM_CPUS sets the cores of the build machine (4).
 #
 # The host needs Docker, qemu-system-x86_64 with KVM, qemu-img, cloud-localds,
 # ssh and python3. Branches in the sources are resolved to commits, and the image
@@ -91,16 +92,10 @@ done
 say "images"
 
 compose() {
-    docker compose -p "$project" --ansi never --progress plain ${BUILD_PARALLEL:+--parallel "$BUILD_PARALLEL"} \
+    docker compose -p "$project" --ansi never --progress plain \
         --env-file "$core/.env.example" --env-file "$lock" \
         -f "$core/compose/waf.yml" "$@"
 }
-
-# Bake builds every target at once; the plain builder keeps to --parallel.
-if [ -n "${BUILD_PARALLEL:-}" ]; then
-    COMPOSE_BAKE=false
-    export COMPOSE_BAKE
-fi
 
 # Built images get names of their own, so the build does not retag images this
 # host already uses. On the machine they get their installation names back.
@@ -129,9 +124,27 @@ open(sys.argv[3], "w").write("".join(retag))
 open(sys.argv[4], "w").write("".join(f"{i}\n" for i in sorted(images)))
 EOF
 
-PLC_VERSION=${PLC_VERSION:-dev} PLC_REVISION=$revision \
-    compose --profile nodes -f "$work/names.yml" build > "$work/build.log" 2>&1 ||
-    die "image build failed, log: $work/build.log"
+build_images() {
+    PLC_VERSION=${PLC_VERSION:-dev} PLC_REVISION=$revision \
+        compose --profile nodes -f "$work/names.yml" build "$@" >> "$work/build.log" 2>&1 ||
+        die "image build failed, log: $work/build.log"
+}
+
+: > "$work/build.log"
+
+if [ -n "${BUILD_ONE_BY_ONE:-}" ]; then
+    # Compose builds every target at once; one target per call keeps the load to one build.
+    for service in $(sed -n 's/^  \([a-z0-9-]*\):$/\1/p' "$work/names.yml"); do
+        if [ -n "${BUILD_PAUSE:-}" ]; then
+            sh -c "$BUILD_PAUSE" || die "BUILD_PAUSE failed"
+        fi
+
+        printf 'build: %s\n' "$service"
+        build_images "$service"
+    done
+else
+    build_images
+fi
 
 # On the machine haproxy for several nodes runs as a service: its agent comes out of the image.
 agent=$(docker create placitum-image/balancer)
