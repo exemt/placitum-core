@@ -3,14 +3,15 @@
 name: placitum
 
 x-resources: &resources
-  cpus: "2.0"
+  cpus: "${PLC_CPUS:-2}"
   mem_limit: 1g
+  restart: unless-stopped
 
 services:
 
   nats:
     # The bus carries every inspector exchange; two cores are not enough under load.
-    cpus: "6.0"
+    cpus: "${PLC_CPUS_NATS:-6}"
     <<: *resources
     image: nats:2.12-alpine
     command: ["--config", "/etc/nats/nats-server.conf"]
@@ -60,7 +61,7 @@ services:
       start_period: 5s
 
   clickhouse:
-    cpus: "2.0"
+    <<: *resources
     mem_limit: 2g
     image: clickhouse/clickhouse-server:24.8
     environment:
@@ -86,10 +87,13 @@ services:
 
   redis:
     <<: *resources
-    mem_limit: 2560m
+    mem_limit: ${PLC_REDIS_EXCHANGE_MB:-2560}m
     image: redis:7.4-alpine
-    # noeviction: an evicted request object would silently skip inspection.
-    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "noeviction"]
+    environment:
+      REDIS_MB: ${PLC_REDIS_EXCHANGE_MB:-2560}
+    # Data gets 80% of the container memory. noeviction: an evicted request object
+    # would silently skip inspection.
+    command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --maxmemory $$((REDIS_MB * 4 / 5))mb --maxmemory-policy noeviction"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -100,9 +104,11 @@ services:
   # Configuration blobs and inspector state.
   redis-internal:
     <<: *resources
-    mem_limit: 512m
+    mem_limit: ${PLC_REDIS_INTERNAL_MB:-512}m
     image: redis:7.4-alpine
-    command: ["redis-server", "--maxmemory", "400mb", "--maxmemory-policy", "noeviction"]
+    environment:
+      REDIS_MB: ${PLC_REDIS_INTERNAL_MB:-512}
+    command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --maxmemory $$((REDIS_MB * 4 / 5))mb --maxmemory-policy noeviction"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

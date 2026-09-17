@@ -13,7 +13,7 @@ x-build: &build
   REVISION: ${PLC_REVISION:-unknown}
 
 x-resources: &resources
-  cpus: "2.0"
+  cpus: "${PLC_CPUS:-2}"
   mem_limit: 1g
   restart: unless-stopped
 
@@ -83,9 +83,7 @@ services:
     <<: *resources
     build:
       context: ${PLC_SRC_CONTROLLER:?set it in sources.env}
-      args:
-        <<: *build
-        VITE_CONTOUR_FINGERPRINT: ${VITE_CONTOUR_FINGERPRINT:-}
+      args: *build
     ports:
       # API without login: loopback only.
       - "127.0.0.1:${PLC_CONTROLLER_PORT:-8080}:8080"
@@ -105,6 +103,13 @@ services:
       CONTROLLER_FLEET_DEMO: "0"
     secrets:
       - waf_node_pub
+    volumes:
+      - type: bind
+        source: ../secrets/contour-pin.json
+        target: /app/ux/dist/contour-pin.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -201,7 +206,7 @@ services:
 
   keeper:
     <<: *resources
-    cpus: "4.0"
+    cpus: "${PLC_CPUS_KEEPER:-4}"
     mem_limit: 2g
     build:
       context: ${PLC_SRC_KEEPER:?set it in sources.env}
@@ -412,7 +417,7 @@ services:
   # Heavy, downloads model weights on first start: docker compose --profile vlai up -d
   inspector-vlai:
     profiles: ["vlai"]
-    cpus: "2.0"
+    cpus: "${PLC_CPUS:-2}"
     mem_limit: 4g
     restart: unless-stopped
     build:

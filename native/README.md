@@ -109,10 +109,9 @@ The controller and search have no login, so the installer binds them to 127.0.0.
 - **waf is not a PostgreSQL superuser.** In the postgres image it was. The pgcrypto extension is
   trusted and installed by the database owner; installing it beforehand as postgres breaks the
   schema on `COMMENT ON EXTENSION`.
-- **The key fingerprint pin is replaced during installation.** It is baked into the panel build
-  (`VITE_CONTOUR_FINGERPRINT`), while the machine has its own key. The previous pin is kept in
-  `/usr/lib/placitum/controller/PIN`; root replaces it, the controller process does not write its
-  own files.
+- **The key fingerprint pin is written during installation.** The panel reads it from
+  `/usr/lib/placitum/controller/ux/dist/contour-pin.json`; root writes the machine fingerprint
+  there, the controller process does not write its own files.
 - **Every unit sets `WAF_LOG_WRITER`.** Without containers all processes would share the machine
   name in the logs.
 

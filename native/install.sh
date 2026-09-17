@@ -693,25 +693,11 @@ schema() {
     quietly "PostgreSQL schema" as_placitum node src/migrate.ts
 }
 
-# The key fingerprint pin is baked into the panel build; swap it for this machine's key.
+# The panel checks the key the API returns against this machine's fingerprint.
 pin() {
-    old=$(cat /usr/lib/placitum/controller/PIN)
-    new=$(sh /usr/share/placitum/bootstrap/secrets.sh --fingerprint "$secrets")
-    dist=/usr/lib/placitum/controller/ux/dist
-
-    if grep -rqF "$new" "$dist"; then
-        note "panel fingerprint pin: $new"
-        return 0
-    fi
-
-    files=$(grep -rlF "$old" "$dist") || die "pin $old not found in the panel build"
-
-    for file in $files; do
-        sed -i "s|$old|$new|g" "$file"
-    done
-
-    grep -rqF "$new" "$dist" || die "the fingerprint pin did not get into the panel"
-    note "panel fingerprint pin: $new (the build had $old)"
+    fp=$(sh /usr/share/placitum/bootstrap/secrets.sh --fingerprint "$secrets") || die "no key fingerprint"
+    printf '{ "fingerprint": "%s" }\n' "$fp" > /usr/lib/placitum/controller/ux/dist/contour-pin.json
+    note "panel fingerprint pin: $fp"
 }
 
 nginx_stub() {

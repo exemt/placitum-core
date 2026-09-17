@@ -1,8 +1,9 @@
 #!/bin/sh
-# Placitum installer: environment, secrets, infrastructure, components, panel.
+# Placitum installer: settings, secrets, infrastructure, components, panel.
 #
 #     ./install.sh check            checks only, changes nothing
-#     ./install.sh install          everything in order
+#     ./install.sh install          everything in order; the first run asks the settings
+#     ./install.sh reconfigure      ask the settings again and apply them
 #     ./install.sh infra            infrastructure only
 #     ./install.sh panel            set up the panel on a running installation
 #     ./install.sh panel-password   change the panel admin password and lift the login lockout
@@ -12,6 +13,7 @@
 # Options:
 #     --sources <file>   component sources; default sources.env
 #     --no-build         start already built images without rebuilding
+#     --defaults         no questions: settings come from the environment or defaults
 #
 # Images are built on this machine from sources, so it needs access to the git
 # repositories, base images and the Go module proxy.
@@ -28,6 +30,9 @@ PLC_VERSION=${PLC_VERSION:-$(git -C "$here" describe --tags --exact-match 2>/dev
 PLC_REVISION=${PLC_REVISION:-$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 export PLC_VERSION PLC_REVISION
 build=yes
+defaults=no
+# How the user runs this script: a ready machine image wraps it in its own command.
+cli=${PLC_CLI:-./install.sh}
 cmd=${1:-help}
 [ $# -gt 0 ] && shift || true
 
@@ -35,9 +40,23 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --sources) sources=$2; shift 2 ;;
         --no-build) build=no; shift ;;
+        --defaults) defaults=yes; shift ;;
         *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+
+# Asked on the first install and by reconfigure. A value set in the environment
+# becomes the default answer.
+SETTINGS="PLC_NODE_ID PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_REDIS_EXCHANGE_MB PLC_REDIS_INTERNAL_MB"
+
+for name in $SETTINGS; do
+    eval "given_$name=\${$name:-}"
+done
+
+interactive=no
+if [ "$defaults" = no ] && [ -t 0 ] && [ -t 1 ]; then
+    interactive=yes
+fi
 
 say()  { printf '\n== %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
@@ -116,7 +135,7 @@ preflight() {
     command -v openssl >/dev/null 2>&1 || die "openssl not found: it creates the installation key"
 
     free=$(df -Pk "$here" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
-    if [ -n "${free:-}" ] && [ "$free" -lt 20 ]; then
+    if [ "$build" = yes ] && [ -n "${free:-}" ] && [ "$free" -lt 20 ]; then
         warn "${free} GB free: the build needs about 20"
     fi
 
@@ -232,20 +251,33 @@ ask_panel_password() {
 prepare_env() {
     say "environment"
 
+    setup=keep
+
     if [ ! -f "$env_file" ]; then
         cp "$here/.env.example" "$env_file"
-        printf 'created %s from .env.example; check the ports and credentials\n' "$env_file"
+        chmod 600 "$env_file"
+
+        for name in POSTGRES_PASSWORD CLICKHOUSE_PASSWORD MINIO_ROOT_PASSWORD; do
+            set_env "$name" "$(openssl rand -hex 16)"
+        done
+
+        setup=fresh
+        printf 'created %s with new infrastructure passwords\n' "$env_file"
     else
         printf 'environment file exists: %s\n' "$env_file"
     fi
+
+    [ "$cmd" != reconfigure ] || setup=reconfigure
+
+    # shellcheck disable=SC1090
+    . "$env_file"
+    settings
+    cpu_limits
 
     # shellcheck disable=SC1090
     . "$env_file"
     quietly "keys and secrets" env MINIO_ROOT_USER="${MINIO_ROOT_USER:-waf}" \
         MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-wafwafwaf}" sh "$here/bootstrap/secrets.sh"
-
-    fp=$(sh "$here/bootstrap/secrets.sh" --fingerprint)
-    set_env VITE_CONTOUR_FINGERPRINT "$fp"
 
     node_id=${PLC_NODE_ID:-edge-01}
     printf '%s\n' \
@@ -260,10 +292,122 @@ set_env() {
     tmp="$env_file.tmp"
 
     if grep -q "^$name=" "$env_file" 2>/dev/null; then
-        sed "s|^$name=.*|$name=$value|" "$env_file" > "$tmp" && mv "$tmp" "$env_file"
+        sed "s|^$name=.*|$name=$value|" "$env_file" > "$tmp" && cat "$tmp" > "$env_file" && rm -f "$tmp"
     else
         printf '%s=%s\n' "$name" "$value" >> "$env_file"
     fi
+}
+
+is_name() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$'; }
+is_mb()   { printf '%s' "$1" | grep -Eq '^[0-9]{2,6}$' && [ "$1" -ge 64 ]; }
+is_port() { printf '%s' "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+
+is_http_port()  { is_port "$1" && [ "$1" != "${PLC_CONTROLLER_PORT:-8080}" ]; }
+is_https_port() { is_http_port "$1" && [ "$1" != "${PLC_HTTP_PORT:-}" ]; }
+is_panel_port() { is_https_port "$1" && [ "$1" != "${PLC_HTTPS_PORT:-}" ]; }
+
+is_bind() {
+    case "$1" in
+        0.0.0.0|127.0.0.1) return 0 ;;
+        *:*) return 1 ;;
+    esac
+
+    command -v ip >/dev/null 2>&1 || return 0
+    ip -o -4 addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "$1"
+}
+
+why() {
+    case "$1" in
+        is_name)       echo "lowercase latin letters, digits and hyphens" ;;
+        is_mb)         echo "megabytes, at least 64" ;;
+        is_http_port)  echo "a port from 1 to 65535, not the controller API port" ;;
+        is_https_port) echo "a port from 1 to 65535, not the HTTP port or the controller API port" ;;
+        is_panel_port) echo "a port from 1 to 65535, not a traffic port or the controller API port" ;;
+        is_bind)       echo "0.0.0.0, 127.0.0.1 or an IPv4 address of this machine" ;;
+    esac
+}
+
+# ask <variable> <check> <default> <question>. A fresh .env and reconfigure ask on a
+# terminal and write the answer to .env; other runs only check what .env already has.
+ask() {
+    var=$1 check=$2 default=$3 question=$4
+    eval "current=\${$var:-}"
+    eval "given=\${given_$var:-}"
+
+    case "$setup" in
+        keep)
+            [ -z "$current" ] || "$check" "$current" || die "$env_file: $var=$current -- $(why "$check")"
+            return 0
+            ;;
+        reconfigure)
+            default=${given:-${current:-$default}}
+            ;;
+        *)
+            default=${given:-$default}
+            ;;
+    esac
+
+    while :; do
+        answer=$default
+
+        if [ "$interactive" = yes ]; then
+            printf '%s [%s]: ' "$question" "$default"
+            IFS= read -r answer || answer=""
+            [ -n "$answer" ] || answer=$default
+        fi
+
+        "$check" "$answer" && break
+
+        [ "$interactive" = yes ] || die "$var=$answer -- $(why "$check")"
+        warn "$(why "$check")"
+    done
+
+    eval "$var=\$answer"
+    set_env "$var" "$answer"
+}
+
+settings() {
+    mb=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null || true)
+    exchange=2560
+    internal=512
+
+    if [ -n "$mb" ] && [ "$mb" -le 8192 ]; then
+        exchange=640
+        internal=320
+    fi
+
+    if [ "$setup" != keep ]; then
+        say "settings"
+    fi
+
+    ask PLC_NODE_ID    is_name       edge-01 "Node name, shown in the panel and the audit"
+    ask PLC_HTTP_PORT  is_http_port  80      "HTTP traffic port"
+    ask PLC_HTTPS_PORT is_https_port 443     "HTTPS traffic port"
+
+    if [ "$setup" != keep ] && [ "$interactive" = yes ]; then
+        host_addrs
+    fi
+
+    ask PLC_PANEL_BIND is_bind       127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
+    ask PLC_PANEL_PORT is_panel_port 8081      "Panel port"
+
+    ask PLC_REDIS_EXCHANGE_MB is_mb "$exchange" "Exchange Redis memory, MB: request objects waiting for a verdict"
+    ask PLC_REDIS_INTERNAL_MB is_mb "$internal" "Internal Redis memory, MB: configuration and inspector state"
+}
+
+# Docker refuses a CPU cap above the number of cores: caps are lowered to fit this machine.
+cpu_limits() {
+    cores=$(nproc 2>/dev/null || echo 1)
+
+    for pair in PLC_CPUS:2 PLC_CPUS_NATS:6 PLC_CPUS_KEEPER:4; do
+        name=${pair%%:*}
+        eval "value=\${$name:-${pair#*:}}"
+
+        if awk -v v="$value" -v c="$cores" 'BEGIN { exit !(v > c) }'; then
+            set_env "$name" "$cores"
+            printf 'CPU cap %s lowered to %s, the cores of this machine\n' "$name" "$cores"
+        fi
+    done
 }
 
 infra_services="nats nats-box postgres clickhouse redis redis-internal minio minio-mc"
@@ -323,11 +467,11 @@ panel() {
             printf 'admin password changed\n'
             ;;
         kept)
-            printf 'admin exists, password unchanged (to change it: ./install.sh panel-password)\n'
+            printf 'admin exists, password unchanged (to change it: %s panel-password)\n' "$cli"
             ;;
         "generated "*)
             printf '\npanel login: admin / %s\n' "${result#generated }"
-            printf 'the password is not stored anywhere: write it down or change it with ./install.sh panel-password\n'
+            printf 'the password is not stored anywhere: write it down or change it with %s panel-password\n' "$cli"
             ;;
         *)
             die "unexpected answer from bootstrap/panel.mjs: $result"
@@ -392,11 +536,27 @@ summary() {
         printf 'panel:   http://%s:%s\n' "$bind" "$port"
     fi
 
-    printf 'login:   admin, change the password with ./install.sh panel-password\n'
+    printf 'login:   admin, change the password with %s panel-password\n' "$cli"
     printf 'API:     http://127.0.0.1:%s, no login, this machine only (from elsewhere use ssh -L)\n' \
         "${PLC_CONTROLLER_PORT:-8080}"
     printf 'traffic: port %s\n' "${PLC_HTTP_PORT:-80}"
     printf 'log:     %s\n' "$log_file"
+}
+
+install_all() {
+    : > "$log_file"
+    preflight
+    prepare_env
+    check_panel
+    ask_panel_password "$1"
+    infra
+    migrate
+    components
+    panel
+    publish
+    say "done"
+    health
+    summary
 }
 
 case "$cmd" in
@@ -405,19 +565,14 @@ case "$cmd" in
         check_panel
         ;;
     install)
-        : > "$log_file"
-        preflight
-        prepare_env
-        check_panel
-        ask_panel_password "Enter keeps the current one or generates one on the first install"
-        infra
-        migrate
-        components
-        panel
-        publish
-        say "done"
-        health
-        summary
+        install_all "Enter keeps the current one or generates one on the first install"
+        ;;
+    reconfigure)
+        [ -f "$env_file" ] || die "$env_file not found: install first ($cli install)"
+        [ "$interactive" = yes ] || [ "$defaults" = yes ] ||
+            die "reconfigure asks on a terminal; without one, pass --defaults and set the new values in the environment"
+        build=no
+        install_all "Enter keeps the current one"
         ;;
     infra)
         preflight
@@ -425,7 +580,7 @@ case "$cmd" in
         infra
         ;;
     panel|panel-password)
-        [ -f "$env_file" ] || die "$env_file not found: set up the panel on an installed system (./install.sh install)"
+        [ -f "$env_file" ] || die "$env_file not found: set up the panel on an installed system ($cli install)"
         # shellcheck disable=SC1090
         . "$env_file"
 
@@ -447,9 +602,9 @@ case "$cmd" in
         compose waf.yml down
         ;;
     help|-h|--help)
-        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
-        die "unknown command: $cmd (see ./install.sh help)"
+        die "unknown command: $cmd (see $cli help)"
         ;;
 esac

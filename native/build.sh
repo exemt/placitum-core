@@ -336,12 +336,6 @@ app=/usr/lib/placitum/controller
 extract placitum-controller /app "$st$app"
 rm -rf "$st$app/data"
 
-# The fingerprint pin baked into the panel build; native/install.sh swaps it for the machine key.
-pins=$(grep -rhoE 'sha256:[0-9a-f]{64}' "$st$app/ux/dist" | sort -u)
-[ "$(printf '%s\n' "$pins" | grep -c .)" -eq 1 ] ||
-    die "controller: expected one fingerprint pin in the panel build, found: ${pins:-none}"
-printf '%s\n' "$pins" > "$st$app/PIN"
-
 mkdir -p "$st$app/bootstrap"
 node "$here/pkg/patch-panel.mjs" "$core/bootstrap/panel.mjs" > "$st$app/bootstrap/panel.mjs" ||
     die "panel step build failed"

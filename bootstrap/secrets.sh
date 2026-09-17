@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installation key pair, archive credentials and signing keys. Existing files are kept.
+# Installation key pair and its panel pin, archive credentials and signing keys.
+# Existing files are kept.
 #
 #     sh bootstrap/secrets.sh [dir]          create what is missing
 #     sh bootstrap/secrets.sh --fingerprint  print the key fingerprint
@@ -95,5 +96,9 @@ for f in "$key" "$pub" "$creds" "$dir"/*.hmac; do
         chmod 644 "$f"
     fi
 done
+
+# The panel checks the key the API returns against this pin; compose mounts it read-only.
+printf '{ "fingerprint": "%s" }\n' "$(fingerprint)" > "$dir/contour-pin.json"
+chmod 644 "$dir/contour-pin.json"
 
 printf 'key fingerprint: %s\n' "$(fingerprint)"
