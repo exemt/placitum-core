@@ -865,7 +865,14 @@ ask() {
 
     case "$setup" in
         keep)
-            [ -z "$current" ] || "$check" "$current" || die "$env_file: $var=$current -- $(why "$check" "$current")"
+            # A .env from before this setting gets the default without a question.
+            if [ -z "$current" ]; then
+                eval "$var=\$default"
+                set_env "$var" "$default"
+                return 0
+            fi
+
+            "$check" "$current" || die "$env_file: $var=$current -- $(why "$check" "$current")"
             return 0
             ;;
         reconfigure)
