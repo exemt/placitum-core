@@ -218,7 +218,7 @@ the installation names them.
 | `GET /api/actions` | the action vocabulary: axes, verbs, their parameters and which inspectors listen |
 | `GET /api/<scope>/catalog` | one bundle: deny responses, log formats, lists, inspectors, subjects, profiles, pages, body stores, upstreams |
 | `GET /api/<scope>/content-types` | content types for `content` lists |
-| `GET /api/<scope>/crypto` | the contour public key, its algorithm and fingerprint |
+| `GET /api/<scope>/crypto` | the installation public key, its algorithm and fingerprint |
 | `GET /api/log-levels` | current log levels and the services that take them |
 | `PUT /api/log-levels` | set them: `{"levels":{"controller":"debug"}}` |
 
@@ -277,7 +277,7 @@ a `PUT` ignores it, and the Redis URLs come back with their passwords replaced b
 ## Certificates and the object store
 
 A certificate is never sent as a field. The file goes into the object store first, encrypted with the
-contour key, and the certificate then refers to the stored objects.
+installation key, and the certificate then refers to the stored objects.
 
 | Endpoint | What it does |
 | --- | --- |
@@ -305,7 +305,7 @@ An object larger than `CONTROLLER_STORE_MAX_BYTES` gives `413 blob_too_large` wi
 
 ## Inspectors
 
-An inspector is a process that judges requests. The space keeps a catalogue of them: the name a
+An inspector is a process that evaluates requests. The space keeps a catalogue of them: the name a
 configuration refers to, the bus subject the process listens on, and the phases it works in.
 
 | Endpoint | What it does |

@@ -156,7 +156,7 @@ belong to the installer.
 | `PLC_PANEL_LOGIN` | `admin` | login of the panel administrator; not asked, the machine image sets it to the login of the machine |
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
 | `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
-| `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the exchange Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
+| `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the buffer Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
 | `PLC_NODES` | `1` | protection nodes on this machine: one is nginx on the machine itself where it can be, more than one are containers behind haproxy, see [Where the node runs](#where-the-node-runs); asked as "several nodes behind a balancer?", then how many |
 | `PLC_NGINX_WORKERS` | `auto` | nginx processes per node, set in the panel by the installer |
 | `PLC_COPIES_<INSPECTOR>` | `1`, `0` for `VLAI` | copies of each inspector; 0 turns it off, `AUTH` needs at least one for the panel login |
