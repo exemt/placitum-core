@@ -30,12 +30,12 @@ cd placitum-core
 ./install.sh install
 ```
 
-At the start the installer asks a few settings: node name, traffic addresses and ports, panel address
-and port, and the network for the containers.
-One more question opens the rest: nodes on this machine, nginx processes per node, copies of every
-inspector (0 turns one off) and Redis memory. Enter takes the value in brackets. The installer shows
-the plan and applies it after confirmation. Then it asks for the password of the panel user
-`admin`. You can just press Enter: a password is generated and shown once near the end of the
+At the start the installer asks a few settings: traffic addresses, the panel address, the network for
+the containers, whether several protection nodes run behind a balancer, and whether the standard
+set of inspectors and the standard memory, copies and processes suit; a no opens the questions
+behind each. Ports are asked only when the machine holds them already. Enter takes the value in
+brackets. The installer shows the plan and applies it after confirmation. Then it asks for the
+password of the panel user `admin`. You can just press Enter: a password is generated and shown once near the end of the
 installation. It is not stored in plain text anywhere. Without a terminal, pass the password in
 `PLC_PANEL_PASSWORD` and the settings in the environment, see [INSTALL.md](INSTALL.md#installing).
 

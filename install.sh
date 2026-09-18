@@ -55,7 +55,7 @@ INSPECTORS="ip modsec json counter action rewrite cookie captcha auth vlai"
 
 # Asked on the first install and by reconfigure. A value set in the environment
 # becomes the default answer.
-SETTINGS="PLC_NODE_ID PLC_TRAFFIC_BIND PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_SUBNET"
+SETTINGS="PLC_NODE_ID PLC_TRAFFIC_BIND PLC_HTTP_PORT PLC_HTTPS_PORT PLC_PANEL_BIND PLC_PANEL_PORT PLC_PANEL_LOGIN PLC_SUBNET"
 SETTINGS="$SETTINGS PLC_NODES PLC_NGINX_WORKERS"
 
 for name in $INSPECTORS; do
@@ -779,6 +779,8 @@ is_mb()     { printf '%s' "$1" | grep -Eq '^[0-9]{2,6}$' && [ "$1" -ge 64 ]; }
 is_port()   { printf '%s' "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 is_count()  { printf '%s' "$1" | grep -Eq '^[0-9]{1,2}$' && [ "$1" -ge 1 ] && [ "$1" -le 32 ]; }
 is_copies() { printf '%s' "$1" | grep -Eq '^[0-9]{1,2}$' && [ "$1" -le 32 ]; }
+is_nodes()  { is_count "$1" && [ "$1" -ge 2 ]; }
+is_login()  { printf '%s' "$1" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; }
 
 is_workers() {
     [ "$1" = auto ] || { printf '%s' "$1" | grep -Eq '^[0-9]{1,3}$' && [ "$1" -ge 1 ] && [ "$1" -le 256 ]; }
@@ -834,6 +836,8 @@ why() {
         is_name)       echo "lowercase latin letters, digits and hyphens" ;;
         is_mb)         echo "megabytes, at least 64" ;;
         is_count)      echo "a number from 1 to 32" ;;
+        is_nodes)      echo "a number from 2 to 32: with one node there is nothing to balance" ;;
+        is_login)      echo "lowercase latin letters, digits, - and _, up to 32, starting with a letter" ;;
         is_copies)     echo "a number from 0 to 32; 0 turns the inspector off" ;;
         is_workers)    echo "auto or a number from 1 to 256" ;;
         is_http_port)  echo "a port from 1 to 65535, not the controller API port" ;;
@@ -902,6 +906,78 @@ ask() {
     set_env "$var" "$answer"
 }
 
+# quiet <variable> <check> <default>: a setting without a question: the environment, the current
+# answer or the default, checked like an answer.
+quiet() {
+    was=$interactive
+    interactive=no
+    ask "$1" "$2" "$3" ""
+    interactive=$was
+}
+
+# yes_no <question> <y|n>: on a terminal asks, otherwise takes the default. True for yes.
+yes_no() {
+    if [ "$interactive" != yes ]; then
+        [ "$2" = y ]
+        return
+    fi
+
+    while :; do
+        if [ "$2" = y ]; then
+            printf '%s [Y/n]: ' "$1"
+        else
+            printf '%s [y/N]: ' "$1"
+        fi
+
+        IFS= read -r reply || reply=""
+
+        case "$reply" in
+            "")           [ "$2" = y ]; return ;;
+            y|Y|yes|Yes)  return 0 ;;
+            n|N|no|No)    return 1 ;;
+        esac
+    done
+}
+
+# port_taken <port>: something on this machine listens on it already.
+port_taken() {
+    command -v ss >/dev/null 2>&1 || return 1
+    ss -ltnH "sport = :$1" 2>/dev/null | grep -q .
+}
+
+# ask_port <variable> <check> <default> <question>: a fresh installation asks about a port only
+# when the machine has something on it already; reconfigure asks as usual.
+ask_port() {
+    eval "given=\${given_$1:-}"
+
+    if [ "$setup" = reconfigure ]; then
+        ask "$@"
+    elif [ "$setup" = fresh ] && [ -z "$given" ] && port_taken "$3"; then
+        warn "port $3 is taken on this machine already"
+        ask "$@"
+    else
+        quiet "$1" "$2" "$3"
+    fi
+}
+
+# copies <inspector>: the copies the answers give an inspector: the environment, the current
+# answer or the standard, which is one of everything but vlai.
+copies() {
+    eval "value=\${given_PLC_COPIES_$(upper "$1"):-\${PLC_COPIES_$(upper "$1"):-}}"
+
+    if [ -z "$value" ]; then
+        value=1
+        [ "$1" != vlai ] || value=0
+    fi
+
+    printf '%s' "$value"
+}
+
+# absent <inspector>: this machine builds no images and has none for the inspector.
+absent() {
+    printf '%s\n' "$absent" | grep -q "^inspector-$1 "
+}
+
 settings() {
     mb=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null || true)
     exchange=2560
@@ -916,17 +992,22 @@ settings() {
         say "settings"
     fi
 
-    ask PLC_NODE_ID is_name edge-01 "Node name, shown in the panel and the audit"
+    # The node takes the name of this machine when it fits, edge-01 otherwise; the panel login is
+    # admin unless the environment says otherwise. Neither is a question.
+    node=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]' | cut -d. -f1)
+    is_name "$node" || node=edge-01
+    quiet PLC_NODE_ID is_name "$node"
+    quiet PLC_PANEL_LOGIN is_login admin
 
     if [ "$setup" != keep ] && [ "$interactive" = yes ]; then
         host_addrs
     fi
 
-    ask PLC_TRAFFIC_BIND is_bind_list  0.0.0.0   "Traffic addresses: 0.0.0.0 for all, or addresses of this machine separated by commas"
-    ask PLC_HTTP_PORT    is_http_port  80        "HTTP traffic port"
-    ask PLC_HTTPS_PORT   is_https_port 443       "HTTPS traffic port"
-    ask PLC_PANEL_BIND   is_bind       127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
-    ask PLC_PANEL_PORT   is_panel_port 8081      "Panel port"
+    ask PLC_TRAFFIC_BIND is_bind_list 0.0.0.0 "Traffic addresses: 0.0.0.0 for all, or addresses of this machine separated by commas"
+    ask_port PLC_HTTP_PORT  is_http_port  80  "HTTP traffic port"
+    ask_port PLC_HTTPS_PORT is_https_port 443 "HTTPS traffic port"
+    ask PLC_PANEL_BIND is_bind 127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
+    ask_port PLC_PANEL_PORT is_panel_port 8081 "Panel port"
 
     # The network is proposed only when it is asked or missing: the proposal looks at every route.
     subnet=""
@@ -947,40 +1028,145 @@ settings() {
         set_env PLC_SUBNET "$PLC_SUBNET"
     fi
 
-    # Nodes, inspectors and memory come with values that suit most machines.
-    asked=$interactive
+    # One node on this machine, or several in containers behind a balancer.
+    nodes=${given_PLC_NODES:-${PLC_NODES:-1}}
 
-    if [ "$setup" != keep ] && [ "$interactive" = yes ]; then
-        printf 'Change nodes, nginx processes, inspectors and Redis memory? [y/N]: '
-        IFS= read -r reply || reply=""
-        case "$reply" in
-            y|Y|yes) ;;
-            *) interactive=no ;;
-        esac
+    if [ "$setup" = keep ]; then
+        quiet PLC_NODES is_count "$nodes"
+    else
+        default=n
+        [ "$nodes" -le 1 ] || default=y
+
+        if yes_no "Several protection nodes behind a balancer, so that a node can be restarted without dropping traffic?" "$default"; then
+            [ "$nodes" -ge 2 ] || nodes=2
+            ask PLC_NODES is_nodes "$nodes" "Protection nodes behind the balancer"
+        else
+            PLC_NODES=1
+            set_env PLC_NODES 1
+        fi
     fi
 
-    ask PLC_NODES         is_count   1    "Protection nodes on this machine, each nginx with its agent"
-    ask PLC_NGINX_WORKERS is_workers auto "nginx processes per node: auto means one per core"
+    # Which inspectors run. The standard set is every inspector but vlai; a machine that builds
+    # no images cannot turn on an inspector it has no image for.
+    standard=y
+    list=""
 
     for name in $INSPECTORS; do
-        eval "given=\${given_PLC_COPIES_$(upper "$name"):-}"
-
-        # A machine that does not build images does not ask about an inspector it has no image for.
-        if [ -z "$given" ] && printf '%s\n' "$absent" | grep -q "^inspector-$name "; then
+        if absent "$name"; then
             continue
         fi
 
-        case "$name" in
-            auth) ask PLC_COPIES_AUTH is_count  1 "Copies of the auth inspector: the panel login needs at least one" ;;
-            vlai) ask PLC_COPIES_VLAI is_copies 0 "Copies of the vlai classifier, 0 is off: 4 GB more memory and a model download" ;;
-            *)    ask "PLC_COPIES_$(upper "$name")" is_copies 1 "Copies of the $name inspector, 0 is off" ;;
+        [ "$name" = vlai ] || list="$list $name"
+
+        case "$name:$(copies "$name")" in
+            vlai:0) ;;
+            vlai:*) standard=n ;;
+            *:0)    standard=n ;;
         esac
     done
 
-    ask PLC_REDIS_EXCHANGE_MB is_mb "$exchange" "Exchange Redis memory, MB: request objects waiting for a verdict"
-    ask PLC_REDIS_INTERNAL_MB is_mb "$internal" "Internal Redis memory, MB: configuration and inspector state"
+    if [ "$setup" = keep ]; then
+        for name in $INSPECTORS; do
+            if absent "$name"; then
+                continue
+            fi
 
-    interactive=$asked
+            case "$name" in
+                auth) quiet PLC_COPIES_AUTH is_count "$(copies "$name")" ;;
+                *)    quiet "PLC_COPIES_$(upper "$name")" is_copies "$(copies "$name")" ;;
+            esac
+        done
+    elif yes_no "Standard set of inspectors (${list# })?" "$standard"; then
+        # Every inspector on with the copies it has, an inspector that was off with one, vlai off.
+        for name in $INSPECTORS; do
+            if absent "$name"; then
+                continue
+            fi
+
+            value=$(copies "$name")
+
+            case "$name" in
+                vlai) value=0 ;;
+                *)    [ "$value" -gt 0 ] || value=1 ;;
+            esac
+
+            eval "PLC_COPIES_$(upper "$name")=\$value"
+            set_env "PLC_COPIES_$(upper "$name")" "$value"
+        done
+    else
+        for name in $INSPECTORS; do
+            if absent "$name"; then
+                continue
+            fi
+
+            value=$(copies "$name")
+            default=y
+            [ "$value" -gt 0 ] || default=n
+
+            case "$name" in
+                auth)
+                    # The panel login needs it.
+                    [ "$value" -gt 0 ] || value=1
+                    ;;
+                vlai)
+                    if yes_no "Inspector vlai, the text classifier: 4 GB more memory and a model download?" "$default"; then
+                        [ "$value" -gt 0 ] || value=1
+                    else
+                        value=0
+                    fi
+                    ;;
+                *)
+                    if yes_no "Inspector $name?" "$default"; then
+                        [ "$value" -gt 0 ] || value=1
+                    else
+                        value=0
+                    fi
+                    ;;
+            esac
+
+            eval "PLC_COPIES_$(upper "$name")=\$value"
+            set_env "PLC_COPIES_$(upper "$name")" "$value"
+        done
+    fi
+
+    # Memory, copies and processes: the standard values suit most machines.
+    standard=y
+    [ "${given_PLC_NGINX_WORKERS:-${PLC_NGINX_WORKERS:-auto}}" = auto ] || standard=n
+    [ "${given_PLC_REDIS_EXCHANGE_MB:-${PLC_REDIS_EXCHANGE_MB:-$exchange}}" = "$exchange" ] || standard=n
+    [ "${given_PLC_REDIS_INTERNAL_MB:-${PLC_REDIS_INTERNAL_MB:-$internal}}" = "$internal" ] || standard=n
+
+    for name in $INSPECTORS; do
+        [ "$(copies "$name")" -le 1 ] || standard=n
+    done
+
+    if [ "$setup" = keep ]; then
+        quiet PLC_NGINX_WORKERS is_workers auto
+        quiet PLC_REDIS_EXCHANGE_MB is_mb "$exchange"
+        quiet PLC_REDIS_INTERNAL_MB is_mb "$internal"
+    elif yes_no "Standard memory, copies and processes?" "$standard"; then
+        PLC_NGINX_WORKERS=auto
+        PLC_REDIS_EXCHANGE_MB=$exchange
+        PLC_REDIS_INTERNAL_MB=$internal
+        set_env PLC_NGINX_WORKERS auto
+        set_env PLC_REDIS_EXCHANGE_MB "$exchange"
+        set_env PLC_REDIS_INTERNAL_MB "$internal"
+
+        for name in $INSPECTORS; do
+            [ "$(copies "$name")" -gt 1 ] || continue
+            eval "PLC_COPIES_$(upper "$name")=1"
+            set_env "PLC_COPIES_$(upper "$name")" 1
+        done
+    else
+        ask PLC_NGINX_WORKERS is_workers auto "nginx processes per node: auto means one per core"
+
+        for name in $INSPECTORS; do
+            [ "$(copies "$name")" -gt 0 ] || continue
+            ask "PLC_COPIES_$(upper "$name")" is_count "$(copies "$name")" "Copies of the $name inspector"
+        done
+
+        ask PLC_REDIS_EXCHANGE_MB is_mb "$exchange" "Exchange Redis memory, MB: request objects waiting for a verdict"
+        ask PLC_REDIS_INTERNAL_MB is_mb "$internal" "Internal Redis memory, MB: configuration and inspector state"
+    fi
 }
 
 label() {
@@ -991,6 +1177,7 @@ label() {
         PLC_HTTPS_PORT)        echo "HTTPS port" ;;
         PLC_PANEL_BIND)        echo "panel address" ;;
         PLC_PANEL_PORT)        echo "panel port" ;;
+        PLC_PANEL_LOGIN)       echo "panel login" ;;
         PLC_SUBNET)            echo "installation network" ;;
         PLC_NODES)             echo "nodes" ;;
         PLC_NGINX_WORKERS)     echo "nginx processes per node" ;;
@@ -1046,7 +1233,7 @@ plan() {
         esac
     fi
 
-    printf '  panel        %s:%s\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
+    printf '  panel        %s:%s, login %s\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT" "${PLC_PANEL_LOGIN:-admin}"
     printf '  network      %s\n' "$PLC_SUBNET"
     if net_moves; then
         printf '               the network is rebuilt: every container restarts, data stays\n'
@@ -1381,7 +1568,8 @@ panel() {
     if [ -f "$env_file" ]; then . "$env_file"; fi
 
     if ! result=$(printf '%s' "$panel_pass" |
-        panel_run -e "PANEL_ADMIN=${1:-ensure}" -e "PANEL_COOKIE_SECURE=${PLC_COOKIE_SECURE:-off}" 2>> "$log_file"); then
+        panel_run -e "PANEL_ADMIN=${1:-ensure}" -e "PANEL_ADMIN_NAME=${PLC_PANEL_LOGIN:-admin}" \
+            -e "PANEL_COOKIE_SECURE=${PLC_COOKIE_SECURE:-off}" 2>> "$log_file"); then
         printf 'failed\n'
         log_tail
         die "panel setup failed, log: $log_file; controller directly: http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
@@ -1391,16 +1579,16 @@ panel() {
 
     case "$result" in
         created)
-            printf 'admin created with the entered password\n'
+            printf '%s created with the entered password\n' "${PLC_PANEL_LOGIN:-admin}"
             ;;
         updated)
-            printf 'admin password changed\n'
+            printf '%s password changed\n' "${PLC_PANEL_LOGIN:-admin}"
             ;;
         kept)
-            printf 'admin exists, password unchanged (to change it: %s panel-password)\n' "$cli"
+            printf '%s exists, password unchanged (to change it: %s panel-password)\n' "${PLC_PANEL_LOGIN:-admin}" "$cli"
             ;;
         "generated "*)
-            printf '\npanel login: admin / %s\n' "${result#generated }"
+            printf '\npanel login: %s / %s\n' "${PLC_PANEL_LOGIN:-admin}" "${result#generated }"
             printf 'the password is not stored anywhere: write it down or change it with %s panel-password\n' "$cli"
             ;;
         *)
@@ -1551,7 +1739,7 @@ summary() {
         printf 'panel:   http://%s:%s\n' "$bind" "$port"
     fi
 
-    printf 'login:   admin, change the password with %s panel-password\n' "$cli"
+    printf 'login:   %s, change the password with %s panel-password\n' "${PLC_PANEL_LOGIN:-admin}" "$cli"
     printf 'API:     http://127.0.0.1:%s, no login, this machine only (from elsewhere use ssh -L)\n' \
         "${PLC_CONTROLLER_PORT:-8080}"
     printf 'traffic: %s, ports %s and %s\n' "${PLC_TRAFFIC_BIND:-0.0.0.0}" "${PLC_HTTP_PORT:-80}" "${PLC_HTTPS_PORT:-443}"

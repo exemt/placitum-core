@@ -107,17 +107,24 @@ there means the machine got no lease, and the panel is reachable from nowhere bu
 
 ## First boot
 
-The first boot runs the installation on the console (tty1):
+The first boot asks about the machine first, then runs the installation, all on the console (tty1).
+Enter takes the value in brackets.
 
-1. A password for the `placitum` user. It logs in on the console and over SSH and has sudo.
-2. The installation settings: node name, traffic addresses and ports, panel address and port, the
-   network for the containers. One more question opens nodes, nginx processes, inspector copies and
-   Redis memory. Enter takes the value in
-   brackets. The panel address defaults to `0.0.0.0`, all addresses of the machine.
-3. The password of the panel user `admin`. Enter generates one and shows it once.
+1. A login and a password: the user of the machine, with sudo, and the administrator of the panel,
+   one and the same. Enter at the password generates one, shown once at the end. The shipped user
+   `placitum` is the default; another login replaces it.
+2. The machine name, `placitum` by default: the hostname, and the name of the node in the panel.
+3. The time zone, `UTC` by default.
+4. The network: for every adapter, DHCP or an address with a prefix length; a fixed address asks
+   for the gateway and the DNS servers. The addresses the machine ended up with are printed.
+5. The installation settings, see [INSTALL.md](../INSTALL.md#installing): traffic addresses, the
+   panel address, the network for the containers, nodes behind a balancer, the set of inspectors
+   and their parameters. The panel is proposed on an address of an internal adapter when the
+   machine has one besides the adapter of its default route, on the machine's address otherwise.
 
 The images are already on the disk, so nothing is downloaded, and the installation takes about a
-minute. At the end the console shows the panel address; the login prompt shows it too.
+minute. At the end the console shows the panel address; the login prompt shows it too, with the
+address of the machine.
 
 Without a console, for example in a cloud, put the answers into `/etc/placitum/answers.env` before
 the first boot. With cloud-init:
@@ -128,12 +135,17 @@ write_files:
   - path: /etc/placitum/answers.env
     permissions: "0600"
     content: |
-      PLC_NODE_ID=edge-01
+      PLC_LOGIN=ops
+      PLC_HOSTNAME=waf-01
+      PLC_TIMEZONE=Europe/Berlin
       PLC_PANEL_PASSWORD=a-long-password
 ```
 
-The variables are the ones from `.env.example`. Missing ones take the defaults. The file is deleted
-once it is read. SSH keys and users in that case come from cloud-init as usual.
+The variables are the ones from `.env.example`, plus `PLC_LOGIN`, `PLC_HOSTNAME` and
+`PLC_TIMEZONE` for the machine itself. Missing ones take the defaults; the network stays on DHCP.
+`PLC_PANEL_PASSWORD` becomes the password of the machine user too; without it that user stays
+locked and the panel generates its own. The file is deleted once it is read. SSH keys and users
+in that case come from cloud-init as usual.
 
 ## On the machine
 

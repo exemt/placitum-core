@@ -35,12 +35,16 @@ cd placitum-core
 
 1. **Checks**: Docker, Compose, `openssl`, disk space, the sources file.
 2. **Settings**: on the first run `.env` is created from `.env.example` with new random passwords
-   for PostgreSQL, ClickHouse and MinIO, and the installer asks on a terminal: node name, traffic
-   addresses and ports (80 and 443 on every address by default), panel address and port, and the
-   installation network for the containers (the installer proposes a free one). One more question
-   opens nodes on this machine, nginx processes per node, copies of every inspector and Redis
-   memory. Enter takes the value in brackets. The installer shows the plan and applies it after
-   confirmation. CPU caps are lowered to the number of cores.
+   for PostgreSQL, ClickHouse and MinIO, and the installer asks on a terminal: traffic addresses
+   (every address of the machine by default), panel address, the installation network for the
+   containers (the installer proposes a free one), whether several protection nodes run behind a
+   balancer and how many, whether the standard set of inspectors runs (every one but `vlai`), and
+   whether the standard memory, copies and processes suit. Ports 80, 443 and 8081 are asked only
+   when something on the machine holds them already. Answering no to a standard set opens the
+   questions behind it: one per inspector, or nginx processes, copies of every inspector and Redis
+   memory. Enter takes the value in brackets. The node takes the name of the machine, `edge-01`
+   when that name does not fit. The installer shows the plan and applies it after confirmation.
+   CPU caps are lowered to the number of cores.
 3. **Secrets**: the installation key, archive credentials and four signing keys. The key
    fingerprint goes to `secrets/contour-pin.json`; the controller container mounts it read-only,
    and the panel checks the key from the API against it.
@@ -74,8 +78,10 @@ PLC_NODE_ID=edge-02 PLC_PANEL_BIND=10.0.0.5 PLC_PANEL_PASSWORD=… ./install.sh 
 ./install.sh reconfigure
 ```
 
-The same questions with the current values in brackets. The installer shows the plan and what
-changes, and after confirmation runs the installation again: containers whose settings changed are
+The same questions with the current values in brackets; the ports are asked too. Yes to a
+standard set puts the standard back: an inspector that was off runs again, copies and processes
+return to one and auto. The installer shows the plan and what changes, and after confirmation
+runs the installation again: containers whose settings changed are
 recreated, nodes and copies beyond the new numbers are removed and leave the panel at once, and the
 configuration is published again. Only images that the new answers need and the machine lacks are
 built, such as haproxy for the second node. Data stays: the internal Redis keeps the configuration
@@ -146,11 +152,12 @@ belong to the installer.
 | `PLC_PANEL_PORT` | `8081` | panel port on that address |
 | `PLC_CONTROLLER_PORT` | `8080` | controller API without login, on `127.0.0.1` only |
 | `PLC_SUBNET` | a free network | installation network for the containers, /16 to /24; NATS, both Redis, MinIO, the controller, the forms, the nodes and the haproxy container take fixed addresses at its start, the other containers its upper half |
-| `PLC_NODE_ID` | `edge-01` | node name in the panel, heartbeat and audit |
+| `PLC_NODE_ID` | the machine name, else `edge-01` | node name in the panel, heartbeat and audit; not asked |
+| `PLC_PANEL_LOGIN` | `admin` | login of the panel administrator; not asked, the machine image sets it to the login of the machine |
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
 | `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
 | `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the exchange Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
-| `PLC_NODES` | `1` | protection nodes on this machine: one is nginx on the machine itself where it can be, more than one are containers behind haproxy, see [Where the node runs](#where-the-node-runs) |
+| `PLC_NODES` | `1` | protection nodes on this machine: one is nginx on the machine itself where it can be, more than one are containers behind haproxy, see [Where the node runs](#where-the-node-runs); asked as "several nodes behind a balancer?", then how many |
 | `PLC_NGINX_WORKERS` | `auto` | nginx processes per node, set in the panel by the installer |
 | `PLC_COPIES_<INSPECTOR>` | `1`, `0` for `VLAI` | copies of each inspector; 0 turns it off, `AUTH` needs at least one for the panel login |
 | `PLC_CPUS`, `PLC_CPUS_NATS`, `PLC_CPUS_KEEPER` | `2`, `6`, `4` | CPU cap per service, for NATS and for keeper; the installer lowers them to the number of cores |
