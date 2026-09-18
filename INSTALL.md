@@ -39,7 +39,7 @@ cd placitum-core
    (every address of the machine by default), panel address, the installation network for the
    containers (the installer proposes a free one), whether several protection nodes run behind a
    balancer and how many, whether the standard set of inspectors runs (every one but `vlai`), and
-   whether the standard memory, copies and processes suit. Ports 80, 443 and 8081 are asked only
+   whether the standard memory, copies and processes suit. Ports 80, 443 and 8080 are asked only
    when something on the machine holds them already. Answering no to a standard set opens the
    questions behind it: one per inspector, or nginx processes, copies of every inspector and Redis
    memory. Enter takes the value in brackets. The node takes the name of the machine, `edge-01`
@@ -149,8 +149,8 @@ belong to the installer.
 | `PLC_TRAFFIC_BIND` | `0.0.0.0` | traffic addresses on the host: all of them, or addresses of this machine separated by commas |
 | `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | traffic ports on the host |
 | `PLC_PANEL_BIND` | `127.0.0.1` | IPv4 address of the machine the node serves the panel on: `127.0.0.1` for the machine only, an internal interface address for its network, `0.0.0.0` for all addresses |
-| `PLC_PANEL_PORT` | `8081` | panel port on that address |
-| `PLC_CONTROLLER_PORT` | `8080` | controller API without login, on `127.0.0.1` only |
+| `PLC_PANEL_PORT` | `8080` | panel port on that address |
+| `PLC_CONTROLLER_PORT` | `8081` | controller API without login, on `127.0.0.1` only |
 | `PLC_SUBNET` | a free network | installation network for the containers, /16 to /24; NATS, both Redis, MinIO, the controller, the forms, the nodes and the haproxy container take fixed addresses at its start, the other containers its upper half |
 | `PLC_NODE_ID` | the machine name, else `edge-01` | node name in the panel, heartbeat and audit; not asked |
 | `PLC_PANEL_LOGIN` | `admin` | login of the panel administrator; not asked, the machine image sets it to the login of the machine |
@@ -199,7 +199,7 @@ stay inside the network: only the node and the controller talk to them.
 
 ## After installation
 
-1. Open the panel at `http://127.0.0.1:8081` (or the address from `PLC_PANEL_BIND`) and sign in as
+1. Open the panel at `http://127.0.0.1:8080` (or the address from `PLC_PANEL_BIND`) and sign in as
    `admin` with the password from the installation. There is one space, `default`, the inspector
    catalog, the shipped profiles and one server, the panel itself (`panel`). There are no other
    servers or routes: the operator creates them.
@@ -221,8 +221,8 @@ stay inside the network: only the node and the controller talk to them.
 ```sh
 ./install.sh status                                                          # services
 docker compose --env-file .env --env-file sources.env -f compose/waf.yml ps
-curl -fsS http://127.0.0.1:8080/healthz                                      # controller
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/api/spaces   # panel without login: 401
+curl -fsS http://127.0.0.1:8081/healthz                                      # controller
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/api/spaces   # panel without login: 401
 docker compose exec -T nats-box nats stream ls                               # WAF_AUDIT and WAF_LOG streams
 ```
 
@@ -232,7 +232,8 @@ frame to the log every four seconds. The panel status page shows the same in a r
 ## Panel
 
 The panel is served by the protection node, not by the controller: the `panel` server on port 8081
-of the container, behind the `auth` login gate. The installer's panel step (`bootstrap/panel.mjs`)
+of the container, published on the machine as `PLC_PANEL_PORT` (8080), behind the `auth` login
+gate. The installer's panel step (`bootstrap/panel.mjs`)
 sets it up through the API from inside the controller container. Running `./install.sh panel` again
 creates only what is missing and keeps operator changes; `admin` is created only when the user list
 is empty. The same run repairs the panel if its server, location or pool was deleted.
@@ -259,15 +260,15 @@ traffic stops with it. `./install.sh check` verifies this. The host firewall is 
 here: Docker routes published ports around UFW. Anything wider than loopback should be served over
 TLS, otherwise the password travels in plain text.
 
-The controller without login listens on `127.0.0.1:8080` only (`PLC_CONTROLLER_PORT`): its API is
+The controller without login listens on `127.0.0.1:8081` only (`PLC_CONTROLLER_PORT`): its API is
 for `install.sh` and for emergency access when the node or the login gate is down. From another
 machine, use a tunnel:
 
 ```sh
-ssh -L 8080:127.0.0.1:8080 <host>
+ssh -L 8081:127.0.0.1:8081 <host>
 ```
 
-Never proxy this port: a host nginx or any reverse proxy in front of `127.0.0.1:8080` exposes the
+Never proxy this port: a host nginx or any reverse proxy in front of `127.0.0.1:8081` exposes the
 API without login again. If you need a proxy, put it in front of the panel port (`PLC_PANEL_PORT`)
 and make it pass the browser's `Host` (`proxy_set_header Host $host;` in nginx): the controller
 refuses a change whose `Origin` names another host than `Host` does, and answers

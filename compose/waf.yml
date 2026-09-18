@@ -58,7 +58,7 @@ services:
       - "${PLC_HTTP_PORT:-80}:8080"
       - "${PLC_HTTPS_PORT:-443}:8443"
       # Panel behind the auth gate; loopback unless PLC_PANEL_BIND says otherwise.
-      - "${PLC_PANEL_BIND:-127.0.0.1}:${PLC_PANEL_PORT:-8081}:8081"
+      - "${PLC_PANEL_BIND:-127.0.0.1}:${PLC_PANEL_PORT:-8080}:8081"
     volumes:
       - ../config/edge/agent.conf:/etc/waf/agent.conf:ro
       - ../config/edge/node.conf:/etc/nginx/waf-node.conf:ro
@@ -87,7 +87,7 @@ services:
       args: *build
     ports:
       # API without login: loopback only.
-      - "127.0.0.1:${PLC_CONTROLLER_PORT:-8080}:8080"
+      - "127.0.0.1:${PLC_CONTROLLER_PORT:-8081}:8080"
     environment:
       CONTROLLER_PORT: "8080"
       CONTROLLER_NAME: controller

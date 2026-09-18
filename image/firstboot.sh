@@ -20,7 +20,7 @@ netplan=/etc/netplan/99-placitum.yaml
 
 issue() {
     bind=127.0.0.1
-    port=8081
+    port=8080
 
     if [ -f "$core/.env" ]; then
         bind=$(sed -n 's/^PLC_PANEL_BIND=//p' "$core/.env")
@@ -38,7 +38,7 @@ issue() {
         printf '  address:   %s\n' "$address"
 
         if [ -f "$installed" ]; then
-            printf '  panel:     http://%s:%s\n' "$bind" "${port:-8081}"
+            printf '  panel:     http://%s:%s\n' "$bind" "${port:-8080}"
             printf '  settings:  sudo placitum reconfigure\n'
             printf '  admin:     sudo placitum panel-password\n\n'
         else
