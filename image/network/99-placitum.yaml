@@ -1,0 +1,23 @@
+# Network of the machine image: an address over DHCP on whatever ethernet adapter the
+# hypervisor gives it. The image runs on KVM, Hyper-V, VirtualBox and VMware, so neither the
+# interface name nor the MAC address is known when the image is built; matching them, as the
+# configuration cloud-init writes on the build machine does, leaves the machine without network
+# everywhere else.
+#
+# For a fixed address, replace dhcp4 with addresses, routes and nameservers here and run
+# netplan apply.
+network:
+  version: 2
+  ethernets:
+    placitum-en:
+      match:
+        name: "en*"
+      dhcp4: true
+      dhcp6: false
+      optional: true
+    placitum-eth:
+      match:
+        name: "eth*"
+      dhcp4: true
+      dhcp6: false
+      optional: true

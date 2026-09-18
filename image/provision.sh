@@ -72,6 +72,13 @@ install -m 0644 /opt/placitum/image/placitum-firstboot.service /etc/systemd/syst
 systemctl enable placitum-firstboot.service
 sh /opt/placitum/image/firstboot.sh --issue
 
+# An address over DHCP on any adapter. The configuration cloud-init writes on this build machine
+# matches its own adapter and would leave every other machine without a network.
+install -m 0600 /opt/placitum/image/network/99-placitum.yaml /etc/netplan/99-placitum.yaml
+install -m 0644 /opt/placitum/image/network/99-placitum-cloud-init.cfg /etc/cloud/cloud.cfg.d/99-placitum-network.cfg
+rm -f /etc/netplan/50-cloud-init.yaml
+netplan generate
+
 # Host keys are created on the first boot of every machine, with or without cloud-init. The
 # packaged unit checks the configuration first and fails without keys, so the check is repeated
 # after the keys are made instead.
@@ -90,7 +97,10 @@ sleep 3
 pkill -KILL -u build 2>/dev/null || true
 userdel -rf build 2>/dev/null || true
 rm -f /etc/sudoers.d/90-cloud-init-users /tmp/provision.sh
-cloud-init clean --logs --seed 2>/dev/null || true
+# --configs: without it cloud-init leaves the network configuration of this build machine, tied
+# to its adapter, in the image.
+cloud-init clean --logs --seed --configs all 2>/dev/null || true
+rm -f /etc/netplan/50-cloud-init.yaml
 rm -f /etc/ssh/ssh_host_*
 truncate -s 0 /etc/machine-id
 rm -f /var/lib/dbus/machine-id
