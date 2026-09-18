@@ -1,23 +1,38 @@
-// Panel step of install.sh, run inside the controller container. stdin: admin password, may be empty.
-// PANEL_ADMIN=ensure|reset. stdout: created, updated, kept or generated <password>; progress goes to stderr.
+// Panel step of install.sh, run inside the controller container, or in the network of the machine
+// when the node runs on it. stdin: admin password, may be empty. PANEL_ADMIN=ensure|reset. stdout:
+// created, updated, kept or generated <password>; progress goes to stderr.
+//
+// PANEL_EDGE: the node, where the panel answers. PANEL_CONTROLLER_HOST, PANEL_CONTROLLER_PORT,
+// PANEL_FORM_HOST, PANEL_FORM_PORT: the controller and the login form for the panel pools, names in
+// the container network or fixed addresses. PANEL_RESOLVER=none: the pools name addresses, no
+// resolver is needed. PANEL_BIND, PANEL_PORT: where the panel port listens.
 
 import { randomBytes } from "node:crypto";
 
 import bcrypt from "bcryptjs";
 
 const API = `http://127.0.0.1:${process.env.CONTROLLER_PORT ?? "8080"}`;
-const EDGE = "http://edge:8081";
+const EDGE = process.env.PANEL_EDGE ?? "http://edge:8081";
 const MODE = process.env.PANEL_ADMIN ?? "ensure";
 
-const PANEL_PORT = 8081;
+const PANEL_PORT = Number(process.env.PANEL_PORT ?? 8081);
+const PANEL_BIND = process.env.PANEL_BIND ?? "0.0.0.0";
 const LOGIN = "/waf/panel-login";
 const USERS = "panel_users";
 const GATE = "auth-panel";
 const ADMIN = "admin";
 
-const RESOLVER = ["127.0.0.11", "valid=10s", "ipv6=off"];
-const CONTROLLER = { pool: "panel", host: "controller", port: 8080 };
-const FORM = { pool: "panel-login", host: "auth-http", port: 8080 };
+const RESOLVER = process.env.PANEL_RESOLVER === "none" ? null : ["127.0.0.11", "valid=10s", "ipv6=off"];
+const CONTROLLER = {
+  pool: "panel",
+  host: process.env.PANEL_CONTROLLER_HOST ?? "controller",
+  port: Number(process.env.PANEL_CONTROLLER_PORT ?? 8080),
+};
+const FORM = {
+  pool: "panel-login",
+  host: process.env.PANEL_FORM_HOST ?? "auth-http",
+  port: Number(process.env.PANEL_FORM_PORT ?? 8080),
+};
 
 const MARKER = "panel";
 const MARKED = ["authenticated", "anonymous", "invalid", "forbidden"];
@@ -229,7 +244,9 @@ if (current === undefined) {
 
 const { nginx: httpNginx } = await api("GET", `${base}/http`);
 
-if ((httpNginx?.resolver ?? []).length === 0) {
+if (RESOLVER === null) {
+  say("resolver not needed: the panel pools name addresses");
+} else if ((httpNginx?.resolver ?? []).length === 0) {
   await patchHttp((http) => ({ nginx: { ...(http.nginx ?? {}), resolver: RESOLVER } }));
   changed = true;
   say(`created: resolver ${RESOLVER.join(" ")} (Docker DNS)`);
@@ -253,15 +270,19 @@ const peerBody = (peer, resolve) => ({
   resolve,
 });
 
+// The pool by its name, or by its peer from before the pools had their names. Its one peer is the
+// target: a name with resolve in the container network, a fixed address without it on the machine.
 async function pool(target) {
-  const found = pools.find((row) => peerOf(row, target) !== undefined);
-  const what = `pool ${target.pool} -> ${target.host}:${target.port} resolve`;
+  const resolve = RESOLVER !== null;
+  const what = `pool ${target.pool} -> ${target.host}:${target.port}${resolve ? " resolve" : ""}`;
+  const found =
+    pools.find((row) => row.name === target.pool) ?? pools.find((row) => peerOf(row, target) !== undefined);
 
   if (found === undefined) {
     const row = await api("POST", `${base}/upstreams`, {
       name: target.pool,
       method: "round_robin",
-      peers: [{ host: target.host, port: target.port, weight: 1, resolve: true }],
+      peers: [{ host: target.host, port: target.port, weight: 1, resolve }],
     });
     changed = true;
     say(`created: ${what}`);
@@ -270,16 +291,16 @@ async function pool(target) {
 
   const peer = peerOf(found, target);
 
-  if (peer.resolve === true) {
+  if ((found.peers ?? []).length === 1 && peer !== undefined && (peer.resolve === true) === resolve) {
     say(`exists: ${what}`);
     return found;
   }
 
   const row = await api("PUT", `${base}/upstreams/${found.uuid}`, {
-    peers: found.peers.map((item) => peerBody(item, item === peer ? true : item.resolve === true)),
+    peers: [peer === undefined ? { host: target.host, port: target.port, weight: 1, resolve } : peerBody(peer, resolve)],
   });
   changed = true;
-  say(`updated: pool ${found.name} (resolve on ${target.host}:${target.port})`);
+  say(`updated: ${what}`);
   return row;
 }
 
@@ -289,11 +310,11 @@ const formPool = await pool(FORM);
 const ports = rows(await api("GET", `${base}/ports`), "ports");
 
 const panelPort = await ensure(
-  `port panel (0.0.0.0:${PANEL_PORT})`,
+  `port panel (${PANEL_BIND}:${PANEL_PORT})`,
   ports,
-  (row) => row.port === PANEL_PORT,
+  (row) => row.name === "panel" || row.port === PANEL_PORT,
   `${base}/ports`,
-  { name: "panel", address: "0.0.0.0", port: PANEL_PORT, ssl: false, http2: false, proxy_protocol: false },
+  { name: "panel", address: PANEL_BIND, port: PANEL_PORT, ssl: false, http2: false, proxy_protocol: false },
 );
 
 const servers = rows(await api("GET", `${base}/servers`), "servers");

@@ -102,8 +102,7 @@ The controller and search have no login, so the installer binds them to 127.0.0.
 ## Differences from the Docker installation
 
 - **Panel pools use 127.0.0.1 without resolve.** There are no container names, so no Docker resolver
-  is configured. The panel step is built from `bootstrap/panel.mjs` with replacements
-  (`pkg/patch-panel.mjs`); a replacement that does not match exactly once fails the build.
+  is configured: the panel step `bootstrap/panel.mjs` takes the addresses from `PANEL_*` variables.
 - **The shipped `http-8080` port becomes `PLC_HTTP_PORT`.** In a container the node listens on 8080;
   on a single machine 8080 is taken by the controller (`pkg/tune.mjs`).
 - **waf is not a PostgreSQL superuser.** In the postgres image it was. The pgcrypto extension is

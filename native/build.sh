@@ -182,7 +182,6 @@ inspector() {
 
 command -v docker >/dev/null 2>&1 || die "docker required: images are the source of the files"
 command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb required"
-command -v node >/dev/null 2>&1 || die "node required: it builds the panel step"
 [ -f "$core/bootstrap/panel.mjs" ] || die "not the core repository: $core/bootstrap/panel.mjs not found"
 
 rm -rf "$stage" "$out"
@@ -337,9 +336,8 @@ extract placitum-controller /app "$st$app"
 rm -rf "$st$app/data"
 
 mkdir -p "$st$app/bootstrap"
-node "$here/pkg/patch-panel.mjs" "$core/bootstrap/panel.mjs" > "$st$app/bootstrap/panel.mjs" ||
-    die "panel step build failed"
-install -m 0644 "$core/bootstrap/publish.mjs" "$here/pkg/tune.mjs" "$st$app/bootstrap/"
+# The panel step takes the addresses of the node, the controller and the form from PANEL_* variables.
+install -m 0644 "$core/bootstrap/panel.mjs" "$core/bootstrap/publish.mjs" "$here/pkg/tune.mjs" "$st$app/bootstrap/"
 
 mkdir -p "$st/$units"
 {

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Builds a ready virtual machine image: Debian 13, Docker, Placitum files and images.
+# Builds a ready virtual machine image: Debian 13, Docker, Placitum files and images,
+# nginx and haproxy with their agents as services of the machine.
 # Nothing is installed yet: the first boot asks the settings on the console and
 # creates keys and passwords of its own on every machine.
 #
@@ -146,12 +147,6 @@ else
     build_images
 fi
 
-# On the machine haproxy for several nodes runs as a service: its agent comes out of the image.
-agent=$(docker create placitum-image/balancer)
-docker cp "$agent:/usr/local/bin/waf-haproxy-agent" "$work/waf-haproxy-agent" >/dev/null ||
-    die "no haproxy agent in placitum-image/balancer"
-docker rm "$agent" >/dev/null
-
 while read -r image; do
     case "$image" in
         placitum-image/*) ;;
@@ -229,7 +224,7 @@ done
 
 # shellcheck disable=SC2086
 scp $ssh_opts -q -P "$VM_SSH_PORT" "$work/core.tar" "$work/images.tar" "$work/retag.txt" \
-    "$work/MANIFEST" "$work/waf-haproxy-agent" "$here/provision.sh" build@127.0.0.1:/tmp/ ||
+    "$work/MANIFEST" "$here/provision.sh" build@127.0.0.1:/tmp/ ||
     die "copy to the build machine failed"
 
 # shellcheck disable=SC2086
@@ -248,6 +243,6 @@ say "image"
 
 out="$work/placitum-$revision.qcow2"
 qemu-img convert -c -O qcow2 "$vm/disk.qcow2" "$out"
-rm -rf "$vm" "$work/images.tar" "$work/core.tar" "$work/waf-haproxy-agent"
+rm -rf "$vm" "$work/images.tar" "$work/core.tar"
 
 printf 'image: %s, %s\n' "$out" "$(du -h "$out" | cut -f1)"

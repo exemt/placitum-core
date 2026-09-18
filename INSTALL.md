@@ -48,10 +48,11 @@ cd placitum-core
    streams and bucket rules are created on start.
 5. **Schema**: on an empty database the controller installs the schema and the shipped data.
 6. **Components**: images are built from `sources.env` and started.
-7. **Panel**: the `panel` server on the node behind the `auth` login gate, and the `admin` user.
+7. **Layout**: running inspectors in the catalog, nginx processes per node, traffic ports and, with
+   several nodes, haproxy in front of them. Where the node runs, on the machine or in a container,
+   follows from the number of nodes and the machine, see [Where the node runs](#where-the-node-runs).
+8. **Panel**: the `panel` server on the node behind the `auth` login gate, and the `admin` user.
    The password is asked right after the settings, before the build (see [Panel](#panel)).
-8. **Layout**: running inspectors in the catalog, nginx processes per node, traffic ports and, with
-   several nodes, haproxy in front of them.
 9. **Delivery**: all configuration channels are published to the processes, and the step waits for
    their reports. Otherwise a fresh installation runs on image defaults and the panel shows a
    mismatch.
@@ -89,20 +90,44 @@ and stops before anything changes. Without confirmation, after a refusal or an i
 stays as it was. Infrastructure passwords are not asked: they are set when the databases are
 created.
 
-### Several nodes on one machine
+### Where the node runs
 
-With `PLC_NODES` above one, nodes `edge-02` and further run next to `edge`. haproxy takes the traffic
-ports and passes TCP connections to every node with PROXY protocol v2; the nodes terminate TLS
-themselves and see the real client address. Where the machine has the services `placitum-haproxy`
-and `placitum-haproxy-agent`, as the [machine image](image/README.md) does, haproxy runs on the
-machine itself; elsewhere it runs as the `balancer` container. Its agent takes the configuration
-from the controller over NATS either way.
+With one node (`PLC_NODES=1`) nginx with the module runs on the machine itself, and only the rest is
+in containers: the node agent takes generations from the controller over NATS and reloads nginx,
+which listens on the traffic ports and the panel port directly. The machine has to carry nginx of
+the version the module is built against, the module, the agent and the service
+`placitum-node-agent`. The [machine image](image/README.md) does; on another machine the installer
+puts them there itself when it runs as root on Debian or Ubuntu with systemd (`image/host.sh node`:
+nginx from nginx.org, held at that version, the module and the agent out of the node image).
+Otherwise, or where the machine has nginx of another version of its own, the node is the `edge`
+container. The plan says which.
 
-The installer writes `compose/layout.yml` on every run: the installation network, fixed addresses and
-the traffic ports. NATS, the nodes and the haproxy container take fixed addresses at the start of the
-network, and haproxy reaches the nodes by them. PROXY protocol is on for the ports `http-8080` and
-`https-8443`, and the nodes trust it only from haproxy: its container address, or the network gateway
-for haproxy on the machine.
+On the machine nginx reaches the containers by their fixed addresses in the installation network:
+the panel pools point at the controller and the login form by address, and the summary prints the
+addresses of the controller and the login and captcha forms for pools of your own. Names of
+containers do not resolve there, and a container of your own in the installation network gets a
+new address after a restart unless its compose file gives it a fixed one (`ipv4_address` in the
+upper half of the network) or publishes its port on the machine. The traffic ports are
+`http-<port>` and `https-<port>` on the traffic address; with several traffic addresses nginx
+listens on all of them. Its logs are in `/var/log/nginx`, the generations in `/etc/nginx` and
+`/var/lib/waf`, and `journalctl -u placitum-node-agent` shows the agent.
+
+With `PLC_NODES` above one every node is a container: `edge`, `edge-02` and further. haproxy takes
+the traffic ports and passes TCP connections to every node with PROXY protocol v2; the nodes
+terminate TLS themselves and see the real client address. haproxy and its agent run on the machine
+itself, as the services `placitum-haproxy` and `placitum-haproxy-agent`, where the machine has them
+or the installer can put them there the same way (`image/host.sh balancer`: haproxy from the
+distribution and the agent out of its image); otherwise haproxy runs as the `balancer` container.
+Its agent takes the configuration from the controller over NATS either way. Going from one node to
+several and back keeps the data: the installer stops what the machine no longer runs and starts the
+rest.
+
+The installer writes `compose/layout.yml` on every run: the installation network, fixed addresses,
+the traffic ports and, with the node on the machine, the addresses the controller writes into the
+node configuration. NATS, both Redis, MinIO, the controller, the forms, the nodes and the haproxy
+container take fixed addresses at the start of the network. PROXY protocol is on for the ports
+`http-8080` and `https-8443`, and the nodes trust it only from haproxy: its container address, or the
+network gateway for haproxy on the machine.
 
 A traffic port created later in the panel needs PROXY protocol too. The panel stays on the first
 node. The haproxy configuration is on the panel page Configuration → haproxy; its entry points
@@ -120,12 +145,12 @@ belong to the installer.
 | `PLC_PANEL_BIND` | `127.0.0.1` | IPv4 address of the machine the node serves the panel on: `127.0.0.1` for the machine only, an internal interface address for its network, `0.0.0.0` for all addresses |
 | `PLC_PANEL_PORT` | `8081` | panel port on that address |
 | `PLC_CONTROLLER_PORT` | `8080` | controller API without login, on `127.0.0.1` only |
-| `PLC_SUBNET` | a free network | installation network for the containers, /16 to /24; NATS, the nodes and the haproxy container take fixed addresses at its start, the other containers its upper half |
+| `PLC_SUBNET` | a free network | installation network for the containers, /16 to /24; NATS, both Redis, MinIO, the controller, the forms, the nodes and the haproxy container take fixed addresses at its start, the other containers its upper half |
 | `PLC_NODE_ID` | `edge-01` | node name in the panel, heartbeat and audit |
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
 | `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
 | `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the exchange Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
-| `PLC_NODES` | `1` | protection nodes on this machine; more than one puts haproxy in front of them |
+| `PLC_NODES` | `1` | protection nodes on this machine: one is nginx on the machine itself where it can be, more than one are containers behind haproxy, see [Where the node runs](#where-the-node-runs) |
 | `PLC_NGINX_WORKERS` | `auto` | nginx processes per node, set in the panel by the installer |
 | `PLC_COPIES_<INSPECTOR>` | `1`, `0` for `VLAI` | copies of each inspector; 0 turns it off, `AUTH` needs at least one for the panel login |
 | `PLC_CPUS`, `PLC_CPUS_NATS`, `PLC_CPUS_KEEPER` | `2`, `6`, `4` | CPU cap per service, for NATS and for keeper; the installer lowers them to the number of cores |

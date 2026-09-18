@@ -17,6 +17,10 @@
 #
 # Images are built on this machine from sources, so it needs access to the git
 # repositories, base images and the Go module proxy.
+#
+# A single node is nginx with the module on this machine when the machine has it (the machine
+# image does; as root on Debian or Ubuntu the installer puts it there), otherwise a container.
+# Several nodes are containers behind haproxy, which likewise runs on this machine when it can.
 
 set -eu
 
@@ -84,6 +88,70 @@ host_balancer() {
         [ -d /run/systemd/system ]
 }
 
+# nginx of this machine, also for a user without /usr/sbin in the path.
+nginx_bin() {
+    command -v nginx 2>/dev/null || { [ -x /usr/sbin/nginx ] && echo /usr/sbin/nginx; }
+}
+
+# The machine can run the single node itself: nginx of the module's version with the module, the
+# node agent and its service, put there by image/host.sh.
+host_node() {
+    [ -x /usr/local/bin/waf-agent ] && [ -f /etc/systemd/system/placitum-node-agent.service ] &&
+        [ -f /usr/lib/nginx/modules/ngx_http_waf_module.so ] && [ -n "$(nginx_bin)" ] &&
+        [ -d /run/systemd/system ]
+}
+
+# host_why node|balancer: why this run cannot put the service on this machine with image/host.sh;
+# empty when it can. Root on Debian or Ubuntu with systemd; nginx of another version or a haproxy
+# this machine runs for something else stays as it is.
+host_why() {
+    [ "$(id -u)" -eq 0 ] || { echo "run the installer as root to put it on this machine"; return 0; }
+    [ -d /run/systemd/system ] && command -v apt-get >/dev/null 2>&1 &&
+        grep -Eq '^ID=(debian|ubuntu)$' /etc/os-release 2>/dev/null ||
+        { echo "on Debian or Ubuntu with systemd it goes on the machine itself"; return 0; }
+
+    case "$1" in
+        node)
+            if [ -n "$(nginx_bin)" ]; then
+                have=$("$(nginx_bin)" -v 2>&1 | sed -n 's|^nginx version: nginx/||p')
+                [ "$have" = "${NGINX_VERSION:-1.28.0}" ] ||
+                    echo "this machine has nginx $have of its own, the module is built for ${NGINX_VERSION:-1.28.0}"
+            fi
+            ;;
+        balancer)
+            if systemctl is-enabled --quiet haproxy 2>/dev/null || systemctl is-active --quiet haproxy 2>/dev/null; then
+                echo "this machine runs haproxy of its own"
+            fi
+            ;;
+    esac
+}
+
+# node_place: host or container, where the single node runs. Several nodes are containers.
+node_place() {
+    if [ "${PLC_NODES:-1}" -le 1 ] && { host_node || [ -z "$(host_why node)" ]; }; then
+        echo host
+    else
+        echo container
+    fi
+}
+
+# balancer_place: none with one node; host or container, where haproxy in front of several runs.
+balancer_place() {
+    if [ "${PLC_NODES:-1}" -le 1 ]; then
+        echo none
+    elif host_balancer || [ -z "$(host_why balancer)" ]; then
+        echo host
+    else
+        echo container
+    fi
+}
+
+# resolver_of: the nameservers of this machine for nginx on it, with the options of the Docker one.
+resolver_of() {
+    ns=$(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null | grep -v ':' | head -n 3 | tr '\n' ' ')
+    printf '%svalid=10s ipv6=off' "${ns:-127.0.0.53 }"
+}
+
 # Compose with the values that follow from the answers: the vlai and haproxy profiles, the captcha
 # form, the CPU cap of a node and compose/layout.yml unless skip_layout says otherwise.
 compose() {
@@ -103,7 +171,7 @@ compose() {
         COMPOSE_PROFILES=""
         [ "${PLC_COPIES_VLAI:-0}" -eq 0 ] || COMPOSE_PROFILES=vlai
 
-        if [ "${PLC_NODES:-1}" -gt 1 ] && ! host_balancer; then
+        if [ "$(balancer_place)" = container ]; then
             COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}nodes"
         fi
 
@@ -222,9 +290,9 @@ host_addrs() {
     done
 }
 
-# net <network> <what>: addresses in the installation network. base; gateway; nats, balancer and
-# node:<n> are fixed at its start; range is the upper half for the other containers, capacity their
-# number.
+# net <network> <what>: addresses in the installation network. base; gateway; nats, balancer,
+# redis, internal, minio, controller, auth, captcha and node:<n> are fixed at its start; range is
+# the upper half for the other containers, capacity their number.
 net() {
     awk -v cidr="$1" -v what="$2" '
         function ip2n(s, p) { split(s, p, "."); return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4] }
@@ -237,6 +305,12 @@ net() {
             else if (what == "gateway") print n2ip(base + 1)
             else if (what == "nats") print n2ip(base + 2)
             else if (what == "balancer") print n2ip(base + 3)
+            else if (what == "redis") print n2ip(base + 4)
+            else if (what == "internal") print n2ip(base + 5)
+            else if (what == "minio") print n2ip(base + 6)
+            else if (what == "controller") print n2ip(base + 7)
+            else if (what == "auth") print n2ip(base + 8)
+            else if (what == "captcha") print n2ip(base + 9)
             else if (what ~ /^node:/) print n2ip(base + 10 + substr(what, 6))
             else if (what == "range") print n2ip(base + size / 2) "/" (c[2] + 1)
             else if (what == "capacity") print size / 2 - 2
@@ -443,12 +517,12 @@ containers() {
     printf '%s' "$total"
 }
 
-# The installation network holds the answers: nodes, NATS and the haproxy container at its start,
-# every other container in its upper half.
+# The installation network holds the answers: nodes, NATS, both Redis, MinIO, the controller, the
+# forms and the haproxy container at its start, every other container in its upper half.
 check_network() {
-    fixed=$((${PLC_NODES:-1} + 1))
+    fixed=$((${PLC_NODES:-1} + 7))
 
-    if [ "${PLC_NODES:-1}" -gt 1 ] && ! host_balancer; then
+    if [ "$(balancer_place)" = container ]; then
         fixed=$((fixed + 1))
     fi
 
@@ -578,10 +652,14 @@ traffic_ports() {
 }
 
 # node.conf of every node and compose/layout.yml: the installation network, fixed addresses, traffic
-# ports and the nodes after the first, rebuilt from the answers on every run.
+# ports and the nodes after the first, rebuilt from the answers on every run. With the node on this
+# machine the edge service runs no container, and the controller writes the fixed addresses of NATS
+# and Redis into the node configuration.
 layout_files() {
     count=${PLC_NODES:-1}
     layout="$here/compose/layout.yml"
+    node=$(node_place)
+    balancer=$(balancer_place)
 
     rm -f "$here"/config/edge/node-*.conf "$here/compose/nodes.yml"
 
@@ -600,12 +678,14 @@ layout_files() {
     [ "$count" -eq 1 ] || printf ' ... %s' "$(node_name "$count")"
     printf '\n'
 
-    # The traffic ports belong to the single node, to the haproxy container or to haproxy on this
-    # machine, which binds them itself.
+    # The traffic ports belong to the node container, to the haproxy container, or to nginx or
+    # haproxy on this machine, which bind them themselves.
     owner=edge
     if [ "$count" -gt 1 ]; then
         owner=balancer
-        ! host_balancer || owner=host
+        [ "$balancer" != host ] || owner=host
+    elif [ "$node" = host ]; then
+        owner=host
     fi
 
     {
@@ -616,13 +696,30 @@ layout_files() {
         printf '          gateway: %s\n' "$(net "$PLC_SUBNET" gateway)"
 
         printf '\nservices:\n'
-        printf '  nats:\n'
-        address "$(net "$PLC_SUBNET" nats)"
+
+        for pair in nats:nats redis:redis redis-internal:internal minio:minio auth-http:auth captcha-http:captcha; do
+            printf '  %s:\n' "${pair%%:*}"
+            address "$(net "$PLC_SUBNET" "${pair#*:}")"
+        done
+
+        printf '  controller:\n'
+        if [ "$node" = host ]; then
+            printf '    environment:\n'
+            printf '      CONTROLLER_NODE_NATS_URL: nats://%s:4222\n' "$(net "$PLC_SUBNET" nats)"
+            printf '      CONTROLLER_NODE_REDIS_URL: redis://%s:6379\n' "$(net "$PLC_SUBNET" redis)"
+            printf '      CONTROLLER_NODE_REDIS_INTERNAL_URL: redis://%s:6379\n' "$(net "$PLC_SUBNET" internal)"
+        fi
+        address "$(net "$PLC_SUBNET" controller)"
 
         printf '\n  edge:\n'
-        printf '    ports: !override\n'
-        [ "$owner" != edge ] || traffic_ports
-        printf '      - "%s:%s:8081"\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
+        if [ "$node" = host ]; then
+            printf '    deploy:\n      replicas: 0\n'
+            printf '    ports: !override []\n'
+        else
+            printf '    ports: !override\n'
+            [ "$owner" != edge ] || traffic_ports
+            printf '      - "%s:%s:8081"\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
+        fi
         address "$(net "$PLC_SUBNET" node:1)"
 
         if [ "$owner" = balancer ]; then
@@ -907,16 +1004,39 @@ plan() {
     say "plan"
 
     workers=${PLC_NGINX_WORKERS:-auto}
-    where="in a container"
-    ! host_balancer || where="on this machine"
+    node=$(node_place)
+    balancer=$(balancer_place)
 
     printf '  traffic      %s, ports %s and %s\n' "$PLC_TRAFFIC_BIND" "$PLC_HTTP_PORT" "$PLC_HTTPS_PORT"
 
     if [ "${PLC_NODES:-1}" -gt 1 ]; then
+        where="in a container"
+        [ "$balancer" != host ] || where="on this machine"
         printf '  nodes        %s from %s, %s nginx processes each, haproxy %s in front\n' \
             "$PLC_NODES" "$PLC_NODE_ID" "$workers" "$where"
+
+        if [ "$balancer" = host ] && ! host_balancer; then
+            printf '               haproxy and its agent are installed on this machine now\n'
+        elif [ "$balancer" = container ]; then
+            printf '               %s\n' "$(host_why balancer)"
+        fi
     else
-        printf '  node         %s, %s nginx processes\n' "$PLC_NODE_ID" "$workers"
+        where="in a container"
+        [ "$node" != host ] || where="nginx on this machine"
+        printf '  node         %s, %s nginx processes, %s\n' "$PLC_NODE_ID" "$workers" "$where"
+
+        if [ "$node" = host ] && ! host_node; then
+            printf '               nginx %s from nginx.org, the module and the node agent are installed on this machine now\n' \
+                "${NGINX_VERSION:-1.28.0}"
+        elif [ "$node" = container ]; then
+            printf '               %s\n' "$(host_why node)"
+        fi
+
+        case "$node:$PLC_TRAFFIC_BIND" in
+            host:*,*)
+                warn "nginx on this machine listens on every address: one traffic address, 0.0.0.0, or haproxy in front of several nodes"
+                ;;
+        esac
     fi
 
     printf '  panel        %s:%s\n' "$PLC_PANEL_BIND" "$PLC_PANEL_PORT"
@@ -1047,7 +1167,7 @@ migrate() {
         quietly "controller build" compose waf.yml build controller
     fi
 
-    quietly "PostgreSQL schema" compose waf.yml run --rm --no-deps controller node src/migrate.ts
+    quietly "PostgreSQL schema" compose waf.yml -f "$here/compose/oneoff.yml" run --rm --no-deps controller node src/migrate.ts
 }
 
 # container_hosts: hostnames of the containers of the installation, one per line.
@@ -1096,23 +1216,78 @@ $(hostname)"
     esac
 }
 
+# node_host start|stop: nginx with the module and the node agent as services of this machine. The
+# agent reaches NATS, Redis and MinIO by their fixed addresses and reads the secrets of this
+# installation; until the first generation nginx runs on a stub without traffic ports.
+node_host() {
+    case "$1" in
+        stop)
+            host_node || return 0
+
+            if systemctl is-enabled --quiet placitum-node-agent 2>/dev/null ||
+                systemctl is-active --quiet placitum-node-agent 2>/dev/null; then
+                quietly "nginx and the node agent on this machine off" systemctl disable --now placitum-node-agent nginx
+                # The agent reports under the name of this machine.
+                gone="$gone
+$(hostname)"
+            fi
+            ;;
+        start)
+            install -d -m 0755 /etc/placitum/node
+            sed -e "s|/run/secrets/waf_node_key|$here/secrets/contour.key|" \
+                -e "s|/run/secrets/waf_s3_creds|$here/secrets/s3.creds|" \
+                -e "s|nats://nats:4222|nats://$(net "$PLC_SUBNET" nats):4222|" \
+                -e "s|redis://redis-internal:6379|redis://$(net "$PLC_SUBNET" internal):6379|" \
+                -e "s|redis://redis:6379|redis://$(net "$PLC_SUBNET" redis):6379|" \
+                -e "s|http://minio:9000|http://$(net "$PLC_SUBNET" minio):9000|" \
+                "$here/config/edge/agent.conf" > /etc/placitum/node/agent.conf
+            chmod 0600 /etc/placitum/node/agent.conf
+
+            {
+                printf 'WAF_NODE_ID=%s\n' "$(node_name 1)"
+                printf 'WAF_AGENT_CONFIG=/etc/placitum/node/agent.conf\n'
+                printf 'WAF_NGINX_MANAGE=on\nWAF_AGENT_LOG=info\nWAF_NGINX_DEBUG=off\n'
+                printf 'WAF_LOG_WRITER=%s\n' "$(node_name 1)"
+            } > /etc/placitum/node-agent.env
+
+            cp "$here/config/edge/node.conf" /etc/nginx/waf-node.conf
+            rm -f /etc/nginx/conf.d/default.conf
+
+            if [ ! -f /etc/nginx/nginx.conf.prev ] && ! grep -q ngx_http_waf_module /etc/nginx/nginx.conf 2>/dev/null; then
+                cp /etc/placitum/nginx-bootstrap.conf /etc/nginx/nginx.conf
+            fi
+
+            quietly "nginx and the node agent on this machine" sh -c \
+                'systemctl enable nginx placitum-node-agent &&
+                 if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi &&
+                 systemctl restart placitum-node-agent'
+            ;;
+    esac
+}
+
 components() {
     say "components"
 
     hosts_before=$(container_hosts)
+    node=$(node_place)
+    balancer=$(balancer_place)
 
-    # What the answers no longer run: vlai, haproxy for a single node, nodes beyond PLC_NODES.
+    # What the answers no longer run: vlai, the haproxy container, nodes beyond PLC_NODES, the node
+    # container when nginx runs on this machine, and the services of this machine the answers do
+    # not need. nginx or haproxy on this machine let the traffic ports go before the others take them.
     if [ "${PLC_COPIES_VLAI:-0}" -eq 0 ]; then
         compose waf.yml --profile vlai rm --stop --force inspector-vlai >> "$log_file" 2>&1 || true
     fi
 
-    if [ "${PLC_NODES:-1}" -le 1 ] || host_balancer; then
+    if [ "$balancer" != container ]; then
         compose waf.yml --profile nodes rm --stop --force balancer >> "$log_file" 2>&1 || true
     fi
 
-    # haproxy on this machine lets the traffic ports go before a single node takes them.
-    if [ "${PLC_NODES:-1}" -le 1 ]; then
-        balancer_host stop
+    [ "$balancer" = host ] || balancer_host stop
+    [ "$node" = host ] || node_host stop
+
+    if [ "$node" = host ]; then
+        compose waf.yml rm --stop --force edge >> "$log_file" 2>&1 || true
     fi
 
     docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-placitum}" \
@@ -1138,6 +1313,16 @@ components() {
             ;;
     esac
 
+    # Services of this machine the answers need and it lacks yet: from the images on it.
+    if [ "$node" = host ] && ! host_node; then
+        quietly "nginx ${NGINX_VERSION:-1.28.0}, the module and the node agent on this machine" \
+            sh "$here/image/host.sh" node
+    fi
+
+    if [ "$balancer" = host ] && ! host_balancer; then
+        quietly "haproxy and its agent on this machine" sh "$here/image/host.sh" balancer
+    fi
+
     quietly "start and health check" compose waf.yml up -d --wait --no-build
 
     # Removed nodes, copies and recreated containers under new hostnames: nothing reports for them any
@@ -1150,6 +1335,32 @@ $(printf '%s\n' "$hosts_before" | grep -vxF -f "$kept" || true)"
     gone=$(printf '%s\n' "$gone" | awk 'NF && !seen[$0]++')
 
     forget_gone
+
+    [ "$node" != host ] || node_host start
+}
+
+# panel_run <docker -e options>: bootstrap/panel.mjs with the API on 127.0.0.1. Inside the
+# controller container, where the node container answers as edge; with the node on this machine, in
+# the network of this machine, where its panel port and the API are, with the panel pools pointed at
+# the fixed addresses of the controller and the login form.
+panel_run() {
+    if [ "$(node_place)" = host ]; then
+        image=$(docker inspect -f '{{.Config.Image}}' "$(compose waf.yml ps -q controller)")
+        edge=${PLC_PANEL_BIND:-127.0.0.1}
+        [ "$edge" != 0.0.0.0 ] || edge=127.0.0.1
+
+        docker run --rm -i --network host \
+            -e "CONTROLLER_PORT=${PLC_CONTROLLER_PORT:-8080}" \
+            -e "PANEL_EDGE=http://$edge:${PLC_PANEL_PORT:-8081}" \
+            -e PANEL_RESOLVER=none \
+            -e "PANEL_CONTROLLER_HOST=$(net "$PLC_SUBNET" controller)" \
+            -e "PANEL_FORM_HOST=$(net "$PLC_SUBNET" auth)" \
+            -e "PANEL_BIND=${PLC_PANEL_BIND:-127.0.0.1}" \
+            -e "PANEL_PORT=${PLC_PANEL_PORT:-8081}" \
+            "$@" "$image" node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")"
+    else
+        compose waf.yml exec -T "$@" controller node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")"
+    fi
 }
 
 panel() {
@@ -1163,9 +1374,7 @@ panel() {
     if [ -f "$env_file" ]; then . "$env_file"; fi
 
     if ! result=$(printf '%s' "$panel_pass" |
-        compose waf.yml exec -T -e "PANEL_ADMIN=${1:-ensure}" \
-            -e "PANEL_COOKIE_SECURE=${PLC_COOKIE_SECURE:-off}" controller \
-            node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")" 2>> "$log_file"); then
+        panel_run -e "PANEL_ADMIN=${1:-ensure}" -e "PANEL_COOKIE_SECURE=${PLC_COOKIE_SECURE:-off}" 2>> "$log_file"); then
         printf 'failed\n'
         log_tail
         die "panel setup failed, log: $log_file; controller directly: http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
@@ -1193,9 +1402,10 @@ panel() {
     esac
 }
 
-# layout.mjs in the controller with the answers: inspectors, nginx processes, nodes behind haproxy.
-# The nodes take PROXY protocol only from haproxy: the address of its container, or the gateway of
-# the installation network for haproxy on this machine.
+# layout.mjs in the controller with the answers: inspectors, nginx processes, where the node runs,
+# traffic and panel ports, nodes behind haproxy. The nodes take PROXY protocol only from haproxy:
+# the address of its container, or the gateway of the installation network for haproxy on this
+# machine. nginx on this machine resolves names with the nameservers of the machine.
 layout_run() {
     nodes=""
     inspectors=""
@@ -1218,10 +1428,14 @@ layout_run() {
     balancer=container
     trust=$(net "$PLC_SUBNET" balancer)
 
-    if host_balancer; then
+    if [ "$(balancer_place)" = host ]; then
         balancer=host
         trust=$(net "$PLC_SUBNET" gateway)
     fi
+
+    node=$(node_place)
+    resolver="127.0.0.11 valid=10s ipv6=off"
+    [ "$node" != host ] || resolver=$(resolver_of)
 
     bind=""
     [ "${PLC_TRAFFIC_BIND:-0.0.0.0}" = 0.0.0.0 ] || bind=$(printf '%s' "$PLC_TRAFFIC_BIND" | tr ',' ' ')
@@ -1231,6 +1445,9 @@ layout_run() {
         -e "LAYOUT_INSPECTORS=${inspectors# }" \
         -e "LAYOUT_WORKERS=${PLC_NGINX_WORKERS:-auto}" \
         -e "LAYOUT_NODES=${nodes# }" \
+        -e "LAYOUT_NODE=$node" \
+        -e "LAYOUT_RESOLVER=$resolver" \
+        -e "LAYOUT_PANEL=${PLC_PANEL_BIND:-127.0.0.1} ${PLC_PANEL_PORT:-8081}" \
         -e "LAYOUT_BALANCER=$balancer" \
         -e "LAYOUT_TRUST=$trust" \
         -e "LAYOUT_BIND=$bind" \
@@ -1242,7 +1459,7 @@ layout() {
     say "layout"
 
     started=$(date +%s)
-    printf '  inspectors, nginx processes, ports, haproxy ... '
+    printf '  inspectors, nginx processes, node placement, ports, haproxy ... '
     printf '\n== %s layout\n' "$(date '+%F %T')" >> "$log_file"
 
     if ! result=$(layout_run all 2>> "$log_file"); then
@@ -1294,11 +1511,19 @@ health() {
         printf '%s\n' "$bad" | sed 's/^/     /' >&2
     fi
 
-    if [ "${PLC_NODES:-1}" -gt 1 ] && host_balancer; then
+    if [ "$(balancer_place)" = host ] && host_balancer; then
         if systemctl is-active --quiet placitum-haproxy && systemctl is-active --quiet placitum-haproxy-agent; then
             printf 'haproxy on this machine: running\n'
         else
             warn "haproxy on this machine is not running: systemctl status placitum-haproxy placitum-haproxy-agent"
+        fi
+    fi
+
+    if [ "$(node_place)" = host ] && host_node; then
+        if systemctl is-active --quiet nginx && systemctl is-active --quiet placitum-node-agent; then
+            printf 'nginx and the node agent on this machine: running\n'
+        else
+            warn "the node on this machine is not running: systemctl status nginx placitum-node-agent"
         fi
     fi
 }
@@ -1323,6 +1548,12 @@ summary() {
     printf 'API:     http://127.0.0.1:%s, no login, this machine only (from elsewhere use ssh -L)\n' \
         "${PLC_CONTROLLER_PORT:-8080}"
     printf 'traffic: %s, ports %s and %s\n' "${PLC_TRAFFIC_BIND:-0.0.0.0}" "${PLC_HTTP_PORT:-80}" "${PLC_HTTPS_PORT:-443}"
+
+    if [ "$(node_place)" = host ] && [ -n "${PLC_SUBNET:-}" ]; then
+        printf 'node:    nginx on this machine; containers by address: controller %s, login form %s, captcha form %s\n' \
+            "$(net "$PLC_SUBNET" controller)" "$(net "$PLC_SUBNET" auth)" "$(net "$PLC_SUBNET" captcha)"
+    fi
+
     printf 'log:     %s\n' "$log_file"
 }
 
@@ -1335,11 +1566,13 @@ install_all() {
     infra
     migrate
     components
-    panel
+    # The layout goes before the panel: the panel step publishes the first generation, which has to
+    # listen on the ports of this run already.
     layout
+    panel
 
     # haproxy on this machine starts once the controller holds its configuration for these nodes.
-    if [ "${PLC_NODES:-1}" -gt 1 ]; then
+    if [ "$(balancer_place)" = host ]; then
         balancer_host start
     fi
 
@@ -1396,6 +1629,7 @@ case "$cmd" in
         say "stopping"
         compose waf.yml down
         balancer_host stop
+        node_host stop
         ;;
     help|-h|--help)
         sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'

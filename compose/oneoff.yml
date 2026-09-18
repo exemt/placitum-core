@@ -1,0 +1,6 @@
+# One-off controller containers of install.sh, such as the schema migration: without the fixed
+# address of compose/layout.yml, which the running controller holds in the installation network.
+services:
+  controller:
+    networks: !override
+      default: {}

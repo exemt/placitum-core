@@ -1,12 +1,14 @@
 // Layout step of install.sh, run inside the controller container: inspectors in the catalog, nginx
-// processes, traffic ports, the real client address and haproxy in front of several nodes. stdout:
-// one line per change.
+// processes, the resolver, traffic and panel ports, the real client address and haproxy in front of
+// several nodes. stdout: one line per change.
 //
 // LAYOUT_INSPECTORS: processes that run. LAYOUT_WORKERS: auto or a number. LAYOUT_NODES:
-// "service:name:address" per node, the first node first. LAYOUT_BALANCER: container or host, where
-// haproxy runs. LAYOUT_TRUST: the only address the nodes take PROXY protocol from. LAYOUT_BIND:
-// traffic addresses of haproxy on the host, empty for all. LAYOUT_PORTS: HTTP and HTTPS traffic
-// ports. LAYOUT_STEP=catalog stops after the catalog.
+// "service:name:address" per node, the first node first. LAYOUT_NODE: container or host, where the
+// single node runs: nginx on the host listens on the traffic and panel ports of the machine itself.
+// LAYOUT_RESOLVER: the resolver of nginx. LAYOUT_PANEL: panel address and port on the machine.
+// LAYOUT_BALANCER: container or host, where haproxy runs. LAYOUT_TRUST: the only address the nodes
+// take PROXY protocol from. LAYOUT_BIND: traffic addresses on the host, empty for all. LAYOUT_PORTS:
+// HTTP and HTTPS traffic ports. LAYOUT_STEP=catalog stops after the catalog.
 
 const API = `http://127.0.0.1:${process.env.CONTROLLER_PORT ?? "8080"}`;
 const INSPECTORS = (process.env.LAYOUT_INSPECTORS ?? "").split(" ").filter((name) => name !== "");
@@ -19,19 +21,45 @@ const NODES = (process.env.LAYOUT_NODES ?? "edge:edge-01")
     return { service, name, address: address ?? service };
   });
 const HOST = process.env.LAYOUT_BALANCER === "host";
+const NODE_HOST = process.env.LAYOUT_NODE === "host";
 const TRUST = process.env.LAYOUT_TRUST ?? "";
 const BIND = (process.env.LAYOUT_BIND ?? "").split(" ").filter((addr) => addr !== "");
 const [HTTP_PORT, HTTPS_PORT] = (process.env.LAYOUT_PORTS ?? "80 443").split(" ").map(Number);
+const RESOLVER = (process.env.LAYOUT_RESOLVER ?? "127.0.0.11 valid=10s ipv6=off")
+  .split(" ")
+  .filter((word) => word !== "");
+const [PANEL_BIND, PANEL_PORT] = (process.env.LAYOUT_PANEL ?? "0.0.0.0 8081").split(" ");
 
 // With more than one node haproxy owns the traffic ports and speaks PROXY protocol to the nodes.
 const PROXY = NODES.length > 1;
 
-// Node ports; haproxy in a container listens on the same ports, haproxy on the host on the traffic
-// ports themselves.
+// The traffic ports of the node. In a container the node listens on 8080 and 8443, and Docker or
+// haproxy maps the traffic ports to them; on the host nginx listens on the traffic ports themselves,
+// on the one traffic address or on all of them.
 const TRAFFIC = [
-  { name: "http-8080", port: 8080, ssl: false, frontend: "http", entry: HTTP_PORT },
-  { name: "https-8443", port: 8443, ssl: true, frontend: "https", entry: HTTPS_PORT },
-];
+  { kind: "http", port: 8080, ssl: false, frontend: "http", entry: HTTP_PORT },
+  { kind: "https", port: 8443, ssl: true, frontend: "https", entry: HTTPS_PORT },
+].map((row) => ({
+  ...row,
+  name: `${row.kind}-${NODE_HOST ? row.entry : row.port}`,
+  listen: NODE_HOST ? row.entry : row.port,
+  address: NODE_HOST && BIND.length === 1 ? BIND[0] : "0.0.0.0",
+}));
+
+// The traffic row of a kind, whatever port it had on the previous run: the shipped http-8080, or
+// the one this step renamed to the traffic port before.
+function trafficRow(ports, want) {
+  const own = ports.filter(
+    (row) => Boolean(row.ssl) === want.ssl && new RegExp(`^${want.kind}-\\d+$`).test(row.name ?? ""),
+  );
+
+  return (
+    own.find((row) => row.port === want.listen) ??
+    own.find((row) => row.name === `${want.kind}-${want.port}`) ??
+    own.find((row) => row.port === want.port) ??
+    own[0]
+  );
+}
 
 const say = (line) => process.stdout.write(`${line}\n`);
 
@@ -124,6 +152,13 @@ if (nginxMain.workerProcesses !== workers) {
   say(`nginx processes per node: ${workers}`);
 }
 
+// Docker DNS in a container; the nameservers of the machine for nginx on it.
+if (!same(nginx.resolver ?? [], RESOLVER)) {
+  nginx.resolver = RESOLVER;
+  httpChanged = true;
+  say(`resolver ${RESOLVER.join(" ")}`);
+}
+
 if (PROXY) {
   const from = [`${TRUST}/32`];
 
@@ -152,33 +187,60 @@ if (httpChanged) {
 }
 
 const ports = (await api("GET", `${base}/ports`)).ports ?? [];
+const where = NODE_HOST ? "on this machine" : "in the container";
 
 for (const want of TRAFFIC) {
-  const found = ports.find((row) => row.port === want.port);
+  const found = trafficRow(ports, want);
 
   if (found === undefined) {
     await api("POST", `${base}/ports`, {
       name: want.name,
-      address: "0.0.0.0",
-      port: want.port,
+      address: want.address,
+      port: want.listen,
       ssl: want.ssl,
       http2: false,
       proxy_protocol: PROXY,
     });
-    say(`port ${want.name}${PROXY ? " with PROXY protocol" : ""}`);
+    say(`port ${want.name} on ${want.address} ${where}${PROXY ? " with PROXY protocol" : ""}`);
     continue;
   }
 
-  if (found.proxy_protocol !== PROXY) {
-    await api("PUT", `${base}/ports/${found.uuid}`, {
-      name: found.name,
-      address: found.address,
-      port: found.port,
-      ssl: found.ssl,
-      http2: found.http2,
-      proxy_protocol: PROXY,
+  const next = {
+    name: want.name,
+    address: want.address,
+    port: want.listen,
+    ssl: found.ssl,
+    http2: found.http2,
+    proxy_protocol: PROXY,
+  };
+  const have = { name: found.name, address: found.address, port: found.port, ssl: found.ssl, http2: found.http2, proxy_protocol: found.proxy_protocol };
+
+  if (!same(next, have)) {
+    await api("PUT", `${base}/ports/${found.uuid}`, next);
+    say(
+      `port ${found.name} -> ${want.name} on ${want.address} ${where}` +
+        (found.proxy_protocol !== PROXY ? `, PROXY protocol ${PROXY ? "on" : "off"}` : ""),
+    );
+  }
+}
+
+// The panel port: the panel step creates it; here it follows the node between the container, where
+// Docker maps the panel address and port to 8081, and the machine, where nginx listens on them.
+const panel = ports.find((row) => row.name === "panel");
+
+if (panel !== undefined) {
+  const want = NODE_HOST ? { address: PANEL_BIND, port: Number(PANEL_PORT) } : { address: "0.0.0.0", port: 8081 };
+
+  if (panel.address !== want.address || panel.port !== want.port) {
+    await api("PUT", `${base}/ports/${panel.uuid}`, {
+      name: panel.name,
+      address: want.address,
+      port: want.port,
+      ssl: panel.ssl,
+      http2: panel.http2,
+      proxy_protocol: panel.proxy_protocol,
     });
-    say(`port ${found.name}: PROXY protocol ${PROXY ? "on" : "off"}`);
+    say(`port panel on ${want.address}:${want.port} ${where}`);
   }
 }
 

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Runs as root on the build machine of image/build.sh: Docker, haproxy, Placitum
-# files and images, the first boot service, then cleanup and power off.
+# Runs as root on the build machine of image/build.sh: Docker, Placitum files and images,
+# nginx and haproxy with their agents as services of the machine, the first boot service,
+# then cleanup and power off.
 
 set -eu
 
@@ -11,10 +12,7 @@ say() { printf '\n== %s\n' "$*"; }
 say "packages"
 
 apt-get update -q
-apt-get install -y -q --no-install-recommends ca-certificates curl gnupg openssl haproxy
-
-# haproxy of the distribution stays off: install.sh runs its own service for several nodes.
-systemctl disable --now haproxy
+apt-get install -y -q --no-install-recommends ca-certificates curl gnupg openssl
 
 install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
@@ -64,11 +62,11 @@ passwd -l placitum
 
 install -m 0755 /opt/placitum/image/placitum /usr/local/sbin/placitum
 
-# haproxy in front of several nodes and its agent; install.sh enables them when it needs them.
-install -m 0755 /tmp/waf-haproxy-agent /usr/local/bin/waf-haproxy-agent
-install -m 0644 /opt/placitum/image/balancer/placitum-haproxy.service \
-    /opt/placitum/image/balancer/placitum-haproxy-agent.service /etc/systemd/system/
-systemctl daemon-reload
+say "services of the machine"
+
+# nginx with the module and the node agent for a single node, haproxy and its agent for several:
+# install.sh turns on what the settings need.
+sh /opt/placitum/image/host.sh all
 
 install -m 0644 /opt/placitum/image/placitum-firstboot.service /etc/systemd/system/
 systemctl enable placitum-firstboot.service
@@ -81,7 +79,7 @@ printf '[Service]\nExecStartPre=-/usr/bin/ssh-keygen -A\n' > /etc/systemd/system
 say "cleanup"
 
 apt-get clean
-rm -rf /var/lib/apt/lists/* /tmp/core.tar /tmp/retag.txt /tmp/MANIFEST /tmp/waf-haproxy-agent
+rm -rf /var/lib/apt/lists/* /tmp/core.tar /tmp/retag.txt /tmp/MANIFEST
 
 cat > /root/seal.sh <<'EOF'
 #!/bin/sh
