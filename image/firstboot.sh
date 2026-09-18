@@ -150,6 +150,12 @@ make_user() {
     if [ "$1" != placitum ] && getent passwd placitum >/dev/null 2>&1; then
         userdel -r placitum 2>/dev/null || true
     fi
+
+    # The password is for ssh too. sshd takes the first value it reads, so this file goes before
+    # the one cloud-init may write with a no.
+    install -d -m 0755 /etc/ssh/sshd_config.d
+    printf 'PasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/10-placitum.conf
+    systemctl reload ssh 2>/dev/null || true
 }
 
 set_hostname() {
@@ -323,7 +329,8 @@ else
     ask_password
 
     if [ -z "$password" ]; then
-        password=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)
+        # Letters and digits that cannot be misread from the console: no 0 and O, no 1, l and I.
+        password=$(tr -dc 'a-km-zA-HJ-NP-Z2-9' < /dev/urandom | head -c 16)
         generated=yes
     fi
 
