@@ -960,17 +960,28 @@ ask_port() {
     fi
 }
 
-# copies <inspector>: the copies the answers give an inspector: the environment, the current
-# answer or the standard, which is one of everything but vlai.
-copies() {
-    eval "value=\${given_PLC_COPIES_$(upper "$1"):-\${PLC_COPIES_$(upper "$1"):-}}"
+# effective <variable> <default>: what a question would take without an answer: the environment,
+# then the current answer, except on a fresh installation, where .env still holds the example
+# and the default of this machine counts.
+effective() {
+    eval "given=\${given_$1:-}"
+    eval "current=\${$1:-}"
 
-    if [ -z "$value" ]; then
-        value=1
-        [ "$1" != vlai ] || value=0
+    if [ -n "$given" ]; then
+        printf '%s' "$given"
+    elif [ "$setup" != fresh ] && [ -n "$current" ]; then
+        printf '%s' "$current"
+    else
+        printf '%s' "$2"
     fi
+}
 
-    printf '%s' "$value"
+# copies <inspector>: the copies the answers give an inspector; the standard is one of everything
+# but vlai.
+copies() {
+    default=1
+    [ "$1" != vlai ] || default=0
+    effective "PLC_COPIES_$(upper "$1")" "$default"
 }
 
 # absent <inspector>: this machine builds no images and has none for the inspector.
@@ -1029,7 +1040,7 @@ settings() {
     fi
 
     # One node on this machine, or several in containers behind a balancer.
-    nodes=${given_PLC_NODES:-${PLC_NODES:-1}}
+    nodes=$(effective PLC_NODES 1)
 
     if [ "$setup" = keep ]; then
         quiet PLC_NODES is_count "$nodes"
@@ -1131,9 +1142,9 @@ settings() {
 
     # Memory, copies and processes: the standard values suit most machines.
     standard=y
-    [ "${given_PLC_NGINX_WORKERS:-${PLC_NGINX_WORKERS:-auto}}" = auto ] || standard=n
-    [ "${given_PLC_REDIS_EXCHANGE_MB:-${PLC_REDIS_EXCHANGE_MB:-$exchange}}" = "$exchange" ] || standard=n
-    [ "${given_PLC_REDIS_INTERNAL_MB:-${PLC_REDIS_INTERNAL_MB:-$internal}}" = "$internal" ] || standard=n
+    [ "$(effective PLC_NGINX_WORKERS auto)" = auto ] || standard=n
+    [ "$(effective PLC_REDIS_EXCHANGE_MB "$exchange")" = "$exchange" ] || standard=n
+    [ "$(effective PLC_REDIS_INTERNAL_MB "$internal")" = "$internal" ] || standard=n
 
     for name in $INSPECTORS; do
         [ "$(copies "$name")" -le 1 ] || standard=n
