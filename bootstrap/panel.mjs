@@ -5,7 +5,8 @@
 // PANEL_EDGE: the node, where the panel answers. PANEL_CONTROLLER_HOST, PANEL_CONTROLLER_PORT,
 // PANEL_FORM_HOST, PANEL_FORM_PORT: the controller and the login form for the panel pools, names in
 // the container network or fixed addresses. PANEL_RESOLVER=none: the pools name addresses, no
-// resolver is needed. PANEL_BIND, PANEL_PORT: where the panel port listens.
+// resolver is needed. PANEL_BIND, PANEL_PORT: where the panel port listens. PANEL_ADMIN_NAME: the
+// login of the administrator (admin).
 
 import { randomBytes } from "node:crypto";
 
@@ -20,7 +21,7 @@ const PANEL_BIND = process.env.PANEL_BIND ?? "0.0.0.0";
 const LOGIN = "/waf/panel-login";
 const USERS = "panel_users";
 const GATE = "auth-panel";
-const ADMIN = "admin";
+const ADMIN = (process.env.PANEL_ADMIN_NAME ?? "admin").trim().toLowerCase() || "admin";
 
 const RESOLVER = process.env.PANEL_RESOLVER === "none" ? null : ["127.0.0.11", "valid=10s", "ipv6=off"];
 const CONTROLLER = {
@@ -211,7 +212,7 @@ let secret = password;
 
 if (current === undefined) {
   if (MODE === "ensure" && entries.length > 0) {
-    say(`no admin in ${USERS}, but the list is not empty: left as the operator set it`);
+    say(`no ${ADMIN} in ${USERS}, but the list is not empty: left as the operator set it`);
   } else {
     admin = secret === "" ? "generated" : "created";
     secret = secret === "" ? generate() : secret;
@@ -220,7 +221,7 @@ if (current === undefined) {
       address: await userLine(secret, null),
     });
     changed = true;
-    say("created: user admin");
+    say(`created: user ${ADMIN}`);
   }
 } else {
   const [, hash = ""] = current.address.split(":");
@@ -236,9 +237,9 @@ if (current === undefined) {
     // Delete the old line only after the new one is saved, so a failed change keeps admin.
     await api("DELETE", `${base}/addresses/${current.uuid}`);
     changed = true;
-    say("changed: admin password");
+    say(`changed: ${ADMIN} password`);
   } else {
-    say(password === "" ? "exists: admin, password unchanged" : "exists: admin with this password");
+    say(password === "" ? `exists: ${ADMIN}, password unchanged` : `exists: ${ADMIN} with this password`);
   }
 }
 
