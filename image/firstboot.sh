@@ -329,8 +329,9 @@ else
     ask_password
 
     if [ -z "$password" ]; then
-        # Letters and digits that cannot be misread from the console: no 0 and O, no 1, l and I.
-        password=$(tr -dc 'a-km-zA-HJ-NP-Z2-9' < /dev/urandom | head -c 16)
+        # Letters and digits that cannot be misread from the console: no 0 and O, no 1, l and I,
+        # no 2 and Z.
+        password=$(tr -dc 'a-hj-km-np-yA-HJ-NP-Y3-9' < /dev/urandom | head -c 16)
         generated=yes
     fi
 
