@@ -6,6 +6,11 @@
 #
 #     sh image/build.sh                    image/work/placitum-<revision>.qcow2
 #     sh image/build.sh --sources <file>   other component sources
+#     sh image/build.sh --base genericcloud  the smaller Debian cloud kernel: KVM, Xen, Hyper-V and
+#                                          VMware paravirtual devices only; generic (default) has
+#                                          the drivers VirtualBox and VMware defaults need
+#
+# image/export.sh turns the qcow2 into VHDX for Hyper-V and an OVA for VirtualBox and VMware.
 #
 # BUILD_ONE_BY_ONE=1 builds the component images one after another instead of all at once, and
 # BUILD_PAUSE runs a command before each of them, such as a wait until the processor cools down:
@@ -21,17 +26,24 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 core=$(dirname "$here")
 work="$here/work"
 sources="$core/sources.env"
+flavour=generic
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --sources) sources=$2; shift 2 ;;
+        --base) flavour=$2; shift 2 ;;
         -h|--help|help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 
+case "$flavour" in
+    generic|genericcloud) ;;
+    *) printf 'unknown base: %s (generic or genericcloud)\n' "$flavour" >&2; exit 2 ;;
+esac
+
 BASE_URL=https://cloud.debian.org/images/cloud/trixie/latest
-BASE_NAME=debian-13-genericcloud-amd64.qcow2
+BASE_NAME=debian-13-$flavour-amd64.qcow2
 
 VM_CPUS=${VM_CPUS:-4}
 VM_MEM=${VM_MEM:-4096}

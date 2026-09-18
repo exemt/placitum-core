@@ -29,6 +29,30 @@ The build machine needs Docker, `qemu-system-x86_64` with access to `/dev/kvm` (
 `qemu-img`, `cloud-localds` from cloud-image-utils, `ssh`, `curl` and `python3`, and internet access:
 Debian and Docker packages are installed from their repositories.
 
+## Formats
+
+The build makes a qcow2 for KVM. `image/export.sh` turns it into the formats of the other
+hypervisors; the machine inside is the same, the first boot goes the same way.
+
+```sh
+sh image/export.sh image/work/placitum-<revision>.qcow2        # both formats
+sh image/export.sh image/work/placitum-<revision>.qcow2 vhdx   # Hyper-V only
+```
+
+| File | Hypervisor | How to run |
+| --- | --- | --- |
+| `placitum-<revision>.qcow2` | KVM, QEMU, Proxmox | a virtio disk and a virtio network adapter, BIOS or UEFI; `stand/vm/vm.sh` of the workspace is an example |
+| `placitum-<revision>.vhdx` | Hyper-V | a generation 2 machine with Secure Boot on the Microsoft UEFI Certificate Authority template, or a generation 1 machine; the disk on the SCSI controller, 2 processors, 4 GB, a network adapter on an external switch |
+| `placitum-<revision>.ova` | VirtualBox, VMware Workstation, ESXi | import the OVA: it describes 2 processors, 4 GB, an LSI Logic SCSI controller and an Intel E1000 adapter; put the adapter on the network the panel is opened from (bridged) |
+
+The image is built on the `generic` Debian cloud image, whose kernel has the drivers of the
+devices these hypervisors emulate. `--base genericcloud` takes the smaller cloud kernel instead,
+which knows KVM, Xen and the paravirtual devices of Hyper-V and VMware only: no VirtualBox, and
+VMware only with the paravirtual SCSI controller and vmxnet3.
+
+Outside KVM there is no cloud-init seed, so the first boot asks its questions on the console of
+the machine; the answers file works where the hypervisor gives cloud-init a NoCloud seed.
+
 ## First boot
 
 The first boot runs the installation on the console (tty1):
@@ -96,8 +120,9 @@ the log for 14. At a constant 100 requests per second that is about 2.3 GB a day
 
 ## Not there yet
 
-- Formats other than qcow2: OVA for VMware and VirtualBox, VHDX for Hyper-V.
-- Checked on KVM only.
+- Hyper-V, VirtualBox and VMware were not tried themselves: the VHDX and the OVA disk were booted
+  under QEMU with UEFI and with an LSI Logic controller and an E1000 adapter, the devices those
+  hypervisors present.
 - Upgrades: a new version is a new machine.
 - External S3 instead of the local MinIO in the settings.
 - The `vlai` classifier: the image has neither its image nor the model, and the installation does
