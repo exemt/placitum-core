@@ -22,8 +22,8 @@ commits, and the image lists them in `/opt/placitum/image/MANIFEST`.
 
 The build loads every core of the machine. On a small machine that overheats, build the component
 images one after another and give the build machine two cores: `BUILD_ONE_BY_ONE=1 VM_CPUS=2 sh
-image/build.sh`. `BUILD_PAUSE` runs a command before each image, for example a script that waits
-until the processor cools down.
+image/build.sh`. `BUILD_PAUSE` runs a command before each image: `BUILD_PAUSE="sh image/cool.sh"`
+waits until the processor is below 70 degrees (`COOL_BELOW`).
 
 The build machine needs Docker, `qemu-system-x86_64` with access to `/dev/kvm` (the `kvm` group),
 `qemu-img`, `cloud-localds` from cloud-image-utils, `ssh`, `curl` and `python3`, and internet access:
@@ -41,7 +41,7 @@ sh image/export.sh image/work/placitum-<revision>.qcow2 vhdx   # Hyper-V only
 
 | File | Hypervisor | How to run |
 | --- | --- | --- |
-| `placitum-<revision>.qcow2` | KVM, QEMU, Proxmox | a virtio disk and a virtio network adapter, BIOS or UEFI; `stand/vm/vm.sh` of the workspace is an example |
+| `placitum-<revision>.qcow2` | KVM, QEMU, Proxmox | a virtio disk and a virtio network adapter, BIOS or UEFI; `image/check.sh kvm` boots it under QEMU |
 | `placitum-<revision>.vhdx` | Hyper-V | a generation 2 machine with Secure Boot on the Microsoft UEFI Certificate Authority template, or a generation 1 machine; the disk on the SCSI controller, 2 processors, 4 GB, a network adapter on an external switch |
 | `placitum-<revision>.ova` | VirtualBox, VMware Workstation, ESXi | import the OVA: it describes 2 processors, 4 GB, an LSI Logic SCSI controller and an Intel E1000 adapter; put the adapter on the network the panel is opened from (bridged) |
 
@@ -52,6 +52,42 @@ VMware only with the paravirtual SCSI controller and vmxnet3.
 
 Outside KVM there is no cloud-init seed, so the first boot asks its questions on the console of
 the machine; the answers file works where the hypervisor gives cloud-init a NoCloud seed.
+
+## Checking a build
+
+`image/check.sh` boots a disk under QEMU with the devices of a hypervisor, waits for the login
+prompt on the serial console and powers the machine off; the disk itself is not written to. It
+shows whether the kernel found the disk and the network adapter, whether ssh started and whether
+the first boot service began.
+
+```sh
+sh image/check.sh kvm    image/work/placitum-<revision>.qcow2   # virtio, BIOS
+sh image/check.sh hyperv image/work/placitum-<revision>.vhdx    # UEFI, the disk on SCSI
+tar -xf image/work/placitum-<revision>.ova                      # the disk of the OVA
+sh image/check.sh ide    placitum-<revision>-disk1.vmdk         # IDE and E1000, as imported
+sh image/check.sh sata   placitum-<revision>-disk1.vmdk         # after a move to a SATA controller
+```
+
+The check machine needs `qemu-system-x86_64` with KVM, `qemu-img`, `python3` and, for `hyperv`,
+the OVMF firmware from the `ovmf` package. This is a boot check, not an installation: the whole
+first boot with the installation is checked on KVM with an answers file, see [First boot](#first-boot).
+
+A release is the three commands in a row: `build.sh`, `export.sh`, `check.sh` for each file, then
+the files with their `sha256sum`.
+
+## Files
+
+| File | What it does |
+| --- | --- |
+| `build.sh` | builds the component images, provisions a Debian machine in QEMU and writes the qcow2 |
+| `provision.sh` | runs inside the build machine: Docker, the images, the Placitum files, the services of the machine, the first boot service, cleanup |
+| `host.sh` | nginx with the module and the node agent, haproxy and its agent as services of the machine, from the images; `install.sh` runs it too where it can |
+| `export.sh` | VHDX for Hyper-V and an OVA for VirtualBox and VMware out of the qcow2 |
+| `check.sh` | boots a disk under QEMU with the devices of a hypervisor |
+| `cool.sh` | waits until the processor cools down, for `BUILD_PAUSE` |
+| `firstboot.sh`, `placitum-firstboot.service` | the first boot on the console: the `placitum` user password and the installation |
+| `placitum` | `sudo placitum <command>` on the machine, the commands of `install.sh` without builds |
+| `balancer/`, `node/` | units and stub configurations of haproxy and nginx on the machine |
 
 ## First boot
 

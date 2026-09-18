@@ -22,8 +22,8 @@ Docker, загружает образы, ставит на машину nginx и
 
 Сборка грузит все ядра машины. Если маленькая машина перегревается, собирайте образы компонентов
 по одному и дайте сборочной машине два ядра: `BUILD_ONE_BY_ONE=1 VM_CPUS=2 sh image/build.sh`.
-`BUILD_PAUSE` выполняет команду перед каждым образом, например скрипт, который ждёт, пока процессор
-остынет.
+`BUILD_PAUSE` выполняет команду перед каждым образом: `BUILD_PAUSE="sh image/cool.sh"` ждёт, пока
+процессор остынет ниже 70 градусов (`COOL_BELOW`).
 
 Сборочной машине нужны Docker, `qemu-system-x86_64` с доступом к `/dev/kvm` (группа `kvm`),
 `qemu-img`, `cloud-localds` из cloud-image-utils, `ssh`, `curl` и `python3`, а ещё интернет: пакеты
@@ -41,7 +41,7 @@ sh image/export.sh image/work/placitum-<ревизия>.qcow2 vhdx   # толь�
 
 | Файл | Гипервизор | Как запустить |
 | --- | --- | --- |
-| `placitum-<ревизия>.qcow2` | KVM, QEMU, Proxmox | диск и сетевой адаптер virtio, BIOS или UEFI; пример — `stand/vm/vm.sh` рабочего места |
+| `placitum-<ревизия>.qcow2` | KVM, QEMU, Proxmox | диск и сетевой адаптер virtio, BIOS или UEFI; `image/check.sh kvm` загружает его под QEMU |
 | `placitum-<ревизия>.vhdx` | Hyper-V | машина второго поколения с Secure Boot по шаблону Microsoft UEFI Certificate Authority или первого поколения; диск на контроллере SCSI, 2 процессора, 4 ГБ, сетевой адаптер на внешнем коммутаторе |
 | `placitum-<ревизия>.ova` | VirtualBox, VMware Workstation, ESXi | импортировать OVA: в нём 2 процессора, 4 ГБ, контроллер LSI Logic SCSI и адаптер Intel E1000; адаптер — в ту сеть, из которой открывают панель (bridged) |
 
@@ -52,6 +52,41 @@ sh image/export.sh image/work/placitum-<ревизия>.qcow2 vhdx   # толь�
 
 Вне KVM у cloud-init нет seed, поэтому первый запуск задаёт вопросы на консоли машины; файл ответов
 работает там, где гипервизор отдаёт cloud-init seed NoCloud.
+
+## Проверка сборки
+
+`image/check.sh` загружает диск под QEMU с устройствами нужного гипервизора, ждёт приглашение входа
+на последовательной консоли и выключает машину; сам диск не меняется. Видно, нашло ли ядро диск и
+сетевой адаптер, поднялся ли ssh и начался ли первый запуск.
+
+```sh
+sh image/check.sh kvm    image/work/placitum-<ревизия>.qcow2   # virtio, BIOS
+sh image/check.sh hyperv image/work/placitum-<ревизия>.vhdx    # UEFI, диск на SCSI
+tar -xf image/work/placitum-<ревизия>.ova                      # диск из OVA
+sh image/check.sh ide    placitum-<ревизия>-disk1.vmdk         # IDE и E1000, как при импорте
+sh image/check.sh sata   placitum-<ревизия>-disk1.vmdk         # после переноса на контроллер SATA
+```
+
+Машине проверки нужны `qemu-system-x86_64` с KVM, `qemu-img`, `python3`, а для `hyperv` — прошивка
+OVMF из пакета `ovmf`. Это проверка загрузки, а не установки: весь первый запуск с установкой
+проверяется на KVM с файлом ответов, см. [Первый запуск](#первый-запуск).
+
+Выпуск — три команды подряд: `build.sh`, `export.sh`, `check.sh` для каждого файла, потом сами файлы
+с их `sha256sum`.
+
+## Файлы
+
+| Файл | Что делает |
+| --- | --- |
+| `build.sh` | собирает образы компонентов, готовит машину Debian в QEMU и пишет qcow2 |
+| `provision.sh` | работает внутри сборочной машины: Docker, образы, файлы Placitum, службы машины, служба первого запуска, зачистка |
+| `host.sh` | nginx с модулем и агентом узла, haproxy с агентом — службами машины, из образов; `install.sh` тоже зовёт его, где может |
+| `export.sh` | VHDX для Hyper-V и OVA для VirtualBox и VMware из qcow2 |
+| `check.sh` | загружает диск под QEMU с устройствами гипервизора |
+| `cool.sh` | ждёт, пока остынет процессор, для `BUILD_PAUSE` |
+| `firstboot.sh`, `placitum-firstboot.service` | первый запуск на консоли: пароль пользователя `placitum` и установка |
+| `placitum` | `sudo placitum <команда>` на машине, команды `install.sh` без сборок |
+| `balancer/`, `node/` | юниты и заглушки конфигураций haproxy и nginx на машине |
 
 ## Первый запуск
 
