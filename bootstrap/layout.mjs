@@ -123,6 +123,17 @@ if (INSPECTORS.length > 0) {
     });
     const body = await res.json().catch(() => ({}));
 
+    // A controller from before the catalog knows no such call: the check waits for the update, and
+    // the full step then refuses an inspector that is still called.
+    if (res.status === 404 || (res.status === 400 && body.error === "invalid_uuid")) {
+      if (process.env.LAYOUT_STEP === "catalog") {
+        say("inspector catalog: the running controller is older than the installer, checked after the update");
+        process.exit(0);
+      }
+
+      throw new Error(`PUT inspectors/installed -> ${res.status}: the controller is older than the installer`);
+    }
+
     if (res.status === 409) {
       const at = (body.uses ?? []).map((use) => use.at).join(", ");
       throw new Error(`${body.name} is still called from ${at}: remove it there or keep its copies above zero`);
