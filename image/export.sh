@@ -5,9 +5,11 @@
 #     sh image/export.sh image/work/placitum-<revision>.qcow2 [vhdx|ova|all]
 #
 # Needs qemu-img, tar and sha256sum. The OVA describes a machine with 2 processors, 4 GB of memory,
-# an LSI Logic SCSI controller and an Intel E1000 network adapter: the defaults both VirtualBox and
-# VMware know, with the drivers of the generic Debian kernel in the image (image/build.sh without
-# --base genericcloud). The files land next to the qcow2 under the same name.
+# the disk on an IDE controller and an Intel E1000 network adapter: what every version of VirtualBox
+# and VMware imports without questions, with the drivers of the generic Debian kernel in the image
+# (image/build.sh without --base genericcloud). After the import the disk can move to a SATA or
+# SCSI controller of the hypervisor: the kernel has those drivers too. The files land next to the
+# qcow2 under the same name.
 
 set -eu
 
@@ -44,7 +46,8 @@ ova() {
 
     qemu-img convert -p -O vmdk -o subformat=streamOptimized "$src" "$stage/$disk"
 
-    capacity=$(qemu-img info --output=json "$src" | sed -n 's/^ *"virtual-size": \([0-9]*\),*$/\1/p' | head -n 1)
+    capacity=$(qemu-img info "$src" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes)$/\1/p')
+    [ -n "$capacity" ] || { printf 'cannot read the virtual size of %s\n' "$src" >&2; exit 1; }
     size=$(stat -c %s "$stage/$disk")
 
     cat > "$stage/$name.ovf" <<EOF
@@ -103,11 +106,11 @@ ova() {
       </Item>
       <Item>
         <rasd:Address>0</rasd:Address>
-        <rasd:Description>SCSI Controller</rasd:Description>
-        <rasd:ElementName>SCSI Controller 0</rasd:ElementName>
+        <rasd:Description>IDE Controller</rasd:Description>
+        <rasd:ElementName>IDE Controller 0</rasd:ElementName>
         <rasd:InstanceID>3</rasd:InstanceID>
-        <rasd:ResourceSubType>lsilogic</rasd:ResourceSubType>
-        <rasd:ResourceType>6</rasd:ResourceType>
+        <rasd:ResourceSubType>PIIX4</rasd:ResourceSubType>
+        <rasd:ResourceType>5</rasd:ResourceType>
       </Item>
       <Item>
         <rasd:AddressOnParent>0</rasd:AddressOnParent>

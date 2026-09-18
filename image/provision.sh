@@ -72,9 +72,12 @@ install -m 0644 /opt/placitum/image/placitum-firstboot.service /etc/systemd/syst
 systemctl enable placitum-firstboot.service
 sh /opt/placitum/image/firstboot.sh --issue
 
-# Host keys are created on the first boot of every machine, with or without cloud-init.
+# Host keys are created on the first boot of every machine, with or without cloud-init. The
+# packaged unit checks the configuration first and fails without keys, so the check is repeated
+# after the keys are made instead.
 install -d /etc/systemd/system/ssh.service.d
-printf '[Service]\nExecStartPre=-/usr/bin/ssh-keygen -A\n' > /etc/systemd/system/ssh.service.d/placitum-keys.conf
+printf '[Service]\nExecStartPre=\nExecStartPre=-/usr/bin/ssh-keygen -A\nExecStartPre=/usr/sbin/sshd -t\n' \
+    > /etc/systemd/system/ssh.service.d/placitum-keys.conf
 
 say "cleanup"
 
