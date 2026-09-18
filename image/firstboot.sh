@@ -27,8 +27,13 @@ issue() {
 
     [ "$bind" != 0.0.0.0 ] || bind='\4'
 
+    # \4 is replaced with the address of the machine by the console itself: on a machine
+    # without an address the line is empty, and that is the first thing to look at.
+    address='\4'
+
     {
         printf 'Placitum\n\n'
+        printf '  address:   %s\n' "$address"
 
         if [ -f "$installed" ]; then
             printf '  panel:     http://%s:%s\n' "$bind" "${port:-8081}"

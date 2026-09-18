@@ -83,11 +83,23 @@ the files with their `sha256sum`.
 | `provision.sh` | runs inside the build machine: Docker, the images, the Placitum files, the services of the machine, the first boot service, cleanup |
 | `host.sh` | nginx with the module and the node agent, haproxy and its agent as services of the machine, from the images; `install.sh` runs it too where it can |
 | `export.sh` | VHDX for Hyper-V and an OVA for VirtualBox and VMware out of the qcow2 |
-| `check.sh` | boots a disk under QEMU with the devices of a hypervisor |
+| `check.sh` | boots a disk under QEMU with the devices of a hypervisor and a random adapter address |
 | `cool.sh` | waits until the processor cools down, for `BUILD_PAUSE` |
 | `firstboot.sh`, `placitum-firstboot.service` | the first boot on the console: the `placitum` user password and the installation |
 | `placitum` | `sudo placitum <command>` on the machine, the commands of `install.sh` without builds |
 | `balancer/`, `node/` | units and stub configurations of haproxy and nginx on the machine |
+| `network/` | the netplan configuration of the machine and the cloud-init drop-in that leaves the network to it |
+
+## Network
+
+The machine takes its address over DHCP on whatever ethernet adapter it is given:
+`/etc/netplan/99-placitum.yaml` matches adapters by name (`en*` and `eth*`), not by hardware
+address, so the same image works on every hypervisor. cloud-init does not configure the network
+here — the configuration it renders is tied to the adapter it saw, and an image carries that to
+machines with other adapters. For a fixed address, put it in that file and run `netplan apply`.
+
+The console greeting shows the address of the machine before the login prompt. An empty address
+there means the machine got no lease, and the panel is reachable from nowhere but itself.
 
 ## First boot
 
