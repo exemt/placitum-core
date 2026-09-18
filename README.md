@@ -113,10 +113,10 @@ installation: nodes, inspectors and processes are added or removed without losin
 `sources.env` has one line per component: the repository address and a branch or tag.
 
 ```
-PLC_SRC_CONTROLLER=https://github.com/exemt/placitum-controller.git#rc_1.0
+PLC_SRC_CONTROLLER=https://github.com/exemt/placitum-controller.git#rc_1.0.1
 ```
 
-Every component comes from its `rc_1.0` branch, the release candidate. Once releases exist, a tag
+Every component comes from its `rc_1.0.1` branch, the release candidate. Once releases exist, a tag
 such as `#v1.2.0` can be used instead of a branch, and this one file then pins the version of the
 whole installation.
 
