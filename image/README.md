@@ -56,9 +56,13 @@ the machine; the answers file works where the hypervisor gives cloud-init a NoCl
 ## Checking a build
 
 `image/check.sh` boots a disk under QEMU with the devices of a hypervisor, waits for the login
-prompt on the serial console and powers the machine off; the disk itself is not written to. It
-shows whether the kernel found the disk and the network adapter, whether ssh started and whether
-the first boot service began.
+prompt and the address of the machine on the serial console, and powers the machine off; the disk
+itself is not written to. It shows whether the kernel found the disk and the network adapter,
+whether ssh started and whether the first boot service began.
+
+The adapter gets a random hardware address on every run. That is the point: a network
+configuration tied to the adapter of the build machine works there and nowhere else, and only a
+different address brings it out.
 
 ```sh
 sh image/check.sh kvm    image/work/placitum-<revision>.qcow2   # virtio, BIOS
