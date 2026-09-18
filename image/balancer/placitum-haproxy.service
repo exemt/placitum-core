@@ -1,0 +1,26 @@
+# haproxy in front of several nodes on this machine. install.sh enables it when PLC_NODES is above
+# one; the configuration comes from the controller through placitum-haproxy-agent.
+[Unit]
+Description=Placitum balancer: haproxy with the configuration from the controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=haproxy
+Group=haproxy
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+RuntimeDirectory=placitum-haproxy
+RuntimeDirectoryPreserve=yes
+StateDirectory=placitum/haproxy
+# Until the first configuration from the controller haproxy runs on a stub without traffic ports.
+ExecStartPre=/bin/sh -c 'test -s /var/lib/placitum/haproxy/haproxy.cfg || cp /etc/placitum/haproxy-bootstrap.cfg /var/lib/placitum/haproxy/haproxy.cfg'
+# -S: the master CLI; the agent reloads through it and learns whether the new configuration loaded.
+ExecStart=/usr/sbin/haproxy -Ws -S /run/placitum-haproxy/master.sock,mode,600 -f /var/lib/placitum/haproxy/haproxy.cfg -p /run/placitum-haproxy/haproxy.pid
+ExecReload=/bin/kill -USR2 $MAINPID
+Restart=always
+RestartSec=2s
+LimitNOFILE=100000
+
+[Install]
+WantedBy=multi-user.target

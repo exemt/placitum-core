@@ -30,7 +30,13 @@ if (space === undefined) {
 }
 
 const base = `/api/${space.uuid}`;
-const { channels = [] } = await api("GET", `${base}/convergence`);
+
+// A channel of an inspector outside the catalog has no process on this installation, as in the panel.
+const { inspectors = [] } = await api("GET", `${base}/inspectors`);
+const installed = new Set(inspectors.map((row) => row.name));
+const here = (channel) => channel.inspector === null || channel.inspector === undefined || installed.has(channel.inspector);
+
+const channels = ((await api("GET", `${base}/convergence`)).channels ?? []).filter(here);
 
 for (const channel of channels) {
   if (QUIET.has(channel.state)) {
@@ -45,7 +51,7 @@ for (const channel of channels) {
 const deadline = Date.now() + WAIT_S * 1000;
 
 for (;;) {
-  const { channels: now = [] } = await api("GET", `${base}/convergence`);
+  const now = ((await api("GET", `${base}/convergence`)).channels ?? []).filter(here);
   const pending = now.filter((channel) => !QUIET.has(channel.state));
 
   if (pending.length === 0) {

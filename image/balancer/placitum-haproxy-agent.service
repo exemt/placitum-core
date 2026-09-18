@@ -1,0 +1,26 @@
+# Agent of haproxy on this machine: takes its configuration from the controller over NATS, checks
+# it, reloads haproxy and reports back. install.sh writes the NATS address to the environment file.
+[Unit]
+Description=Placitum balancer agent: haproxy configuration from the controller over NATS
+After=placitum-haproxy.service docker.service
+Wants=placitum-haproxy.service
+
+[Service]
+User=haproxy
+Group=haproxy
+RuntimeDirectory=waf
+RuntimeDirectoryPreserve=yes
+StateDirectory=placitum/haproxy-agent
+EnvironmentFile=/etc/placitum/haproxy-agent.env
+Environment=WAF_DATA_DIR=/var/lib/placitum/haproxy-agent
+Environment=WAF_HAPROXY_BIN=/usr/sbin/haproxy
+Environment=WAF_HAPROXY_CFG=/var/lib/placitum/haproxy/haproxy.cfg
+Environment=WAF_HAPROXY_PIDFILE=/run/placitum-haproxy/haproxy.pid
+Environment=WAF_HAPROXY_MASTER_SOCK=/run/placitum-haproxy/master.sock
+ExecStart=/usr/local/bin/waf-haproxy-agent
+# NATS runs in a container and comes up after this service on boot.
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

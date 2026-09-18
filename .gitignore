@@ -1,3 +1,6 @@
 .env
 sources.local.env
 install.log
+compose/layout.yml
+config/edge/node-*.conf
+.env.before

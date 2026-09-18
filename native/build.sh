@@ -182,7 +182,6 @@ inspector() {
 
 command -v docker >/dev/null 2>&1 || die "docker required: images are the source of the files"
 command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb required"
-command -v node >/dev/null 2>&1 || die "node required: it builds the panel step"
 [ -f "$core/bootstrap/panel.mjs" ] || die "not the core repository: $core/bootstrap/panel.mjs not found"
 
 rm -rf "$stage" "$out"
@@ -336,16 +335,9 @@ app=/usr/lib/placitum/controller
 extract placitum-controller /app "$st$app"
 rm -rf "$st$app/data"
 
-# The fingerprint pin baked into the panel build; native/install.sh swaps it for the machine key.
-pins=$(grep -rhoE 'sha256:[0-9a-f]{64}' "$st$app/ux/dist" | sort -u)
-[ "$(printf '%s\n' "$pins" | grep -c .)" -eq 1 ] ||
-    die "controller: expected one fingerprint pin in the panel build, found: ${pins:-none}"
-printf '%s\n' "$pins" > "$st$app/PIN"
-
 mkdir -p "$st$app/bootstrap"
-node "$here/pkg/patch-panel.mjs" "$core/bootstrap/panel.mjs" > "$st$app/bootstrap/panel.mjs" ||
-    die "panel step build failed"
-install -m 0644 "$core/bootstrap/publish.mjs" "$here/pkg/tune.mjs" "$st$app/bootstrap/"
+# The panel step takes the addresses of the node, the controller and the form from PANEL_* variables.
+install -m 0644 "$core/bootstrap/panel.mjs" "$core/bootstrap/publish.mjs" "$here/pkg/tune.mjs" "$st$app/bootstrap/"
 
 mkdir -p "$st/$units"
 {

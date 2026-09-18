@@ -1,0 +1,22 @@
+[Unit]
+Description=Placitum first boot: settings and installation
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service cloud-config.service
+Before=getty@tty1.service
+ConditionPathExists=!/var/lib/placitum/installed
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/placitum/image/firstboot.sh
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

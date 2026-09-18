@@ -11,7 +11,7 @@ A quick start and the repository layout are in [README.md](README.md).
 | --- | --- |
 | Docker | 24 or newer, with BuildKit |
 | Docker Compose | 2.20 or newer: the installation relies on `include` |
-| CPU and memory | 8 cores and 16 GB without the text classifier; 4 GB more with `vlai` |
+| CPU and memory | at least 2 cores and 4 GB, see [the measurements](image/README.md#sizing); 8 cores and 16 GB for heavy traffic; 4 GB more with `vlai` |
 | Disk | 20 GB for images, build caches and data; the body archive grows over time |
 | Network | during the build: GitHub, Docker Hub, quay.io, proxy.golang.org, npm, PyPI |
 
@@ -34,23 +34,104 @@ cd placitum-core
 `install` runs in steps and stops at the first failure:
 
 1. **Checks**: Docker, Compose, `openssl`, disk space, the sources file.
-2. **Environment**: `.env` from `.env.example` if it does not exist. Check ports and credentials
-   before the next step: changing them later means recreating containers.
+2. **Settings**: on the first run `.env` is created from `.env.example` with new random passwords
+   for PostgreSQL, ClickHouse and MinIO, and the installer asks on a terminal: node name, traffic
+   addresses and ports (80 and 443 on every address by default), panel address and port, and the
+   installation network for the containers (the installer proposes a free one). One more question
+   opens nodes on this machine, nginx processes per node, copies of every inspector and Redis
+   memory. Enter takes the value in brackets. The installer shows the plan and applies it after
+   confirmation. CPU caps are lowered to the number of cores.
 3. **Secrets**: the installation key, archive credentials and four signing keys. The key
-   fingerprint is written to `.env` and baked into the panel at build time.
+   fingerprint goes to `secrets/contour-pin.json`; the controller container mounts it read-only,
+   and the panel checks the key from the API against it.
 4. **Infrastructure**: NATS, PostgreSQL, ClickHouse, both Redis instances and MinIO; JetStream
    streams and bucket rules are created on start.
 5. **Schema**: on an empty database the controller installs the schema and the shipped data.
 6. **Components**: images are built from `sources.env` and started.
-7. **Panel**: the `panel` server on the node behind the `auth` login gate, and the `admin` user.
-   The password is asked at the very start, before the build (see [Panel](#panel)).
-8. **Delivery**: all configuration channels are published to the processes, and the step waits for
+7. **Layout**: running inspectors in the catalog, nginx processes per node, traffic ports and, with
+   several nodes, haproxy in front of them. Where the node runs, on the machine or in a container,
+   follows from the number of nodes and the machine, see [Where the node runs](#where-the-node-runs).
+8. **Panel**: the `panel` server on the node behind the `auth` login gate, and the `admin` user.
+   The password is asked right after the settings, before the build (see [Panel](#panel)).
+9. **Delivery**: all configuration channels are published to the processes, and the step waits for
    their reports. Otherwise a fresh installation runs on image defaults and the panel shows a
    mismatch.
-9. **Summary**: container health in one line, the panel, API and traffic addresses.
+10. **Summary**: container health in one line, the panel, API and traffic addresses.
 
 Each step leaves one line with its result and time on screen. The full build and compose output
 goes to `install.log` next to `install.sh`; on failure the installer shows its tail.
+
+Without a terminal, or with `--defaults`, nothing is asked: a setting comes from the environment
+if it is set there, otherwise from the default.
+
+```sh
+PLC_NODE_ID=edge-02 PLC_PANEL_BIND=10.0.0.5 PLC_PANEL_PASSWORD=… ./install.sh install --defaults
+```
+
+### Changing the settings
+
+```sh
+./install.sh reconfigure
+```
+
+The same questions with the current values in brackets. The installer shows the plan and what
+changes, and after confirmation runs the installation again: containers whose settings changed are
+recreated, nodes and copies beyond the new numbers are removed and leave the panel at once, and the
+configuration is published again. Only images that the new answers need and the machine lacks are
+built, such as haproxy for the second node. Data stays: the internal Redis keeps the configuration
+the nodes fetch on a volume, so a recreated node applies it without a new publish.
+
+A new installation network takes every container out of the old one and starts it in the new one;
+data stays. Containers of other projects attached to the network, such as an application the routes
+send traffic to, move along under the same aliases.
+
+An inspector that routes or declarations still call is not turned off: the installer names the place
+and stops before anything changes. Without confirmation, after a refusal or an interrupt, `.env`
+stays as it was. Infrastructure passwords are not asked: they are set when the databases are
+created.
+
+### Where the node runs
+
+With one node (`PLC_NODES=1`) nginx with the module runs on the machine itself, and only the rest is
+in containers: the node agent takes generations from the controller over NATS and reloads nginx,
+which listens on the traffic ports and the panel port directly. The machine has to carry nginx of
+the version the module is built against, the module, the agent and the service
+`placitum-node-agent`. The [machine image](image/README.md) does; on another machine the installer
+puts them there itself when it runs as root on Debian or Ubuntu with systemd (`image/host.sh node`:
+nginx from nginx.org, held at that version, the module and the agent out of the node image).
+Otherwise, or where the machine has nginx of another version of its own, the node is the `edge`
+container. The plan says which.
+
+On the machine nginx reaches the containers by their fixed addresses in the installation network:
+the panel pools point at the controller and the login form by address, and the summary prints the
+addresses of the controller and the login and captcha forms for pools of your own. Names of
+containers do not resolve there, and a container of your own in the installation network gets a
+new address after a restart unless its compose file gives it a fixed one (`ipv4_address` in the
+upper half of the network) or publishes its port on the machine. The traffic ports are
+`http-<port>` and `https-<port>` on the traffic address; with several traffic addresses nginx
+listens on all of them. Its logs are in `/var/log/nginx`, the generations in `/etc/nginx` and
+`/var/lib/waf`, and `journalctl -u placitum-node-agent` shows the agent.
+
+With `PLC_NODES` above one every node is a container: `edge`, `edge-02` and further. haproxy takes
+the traffic ports and passes TCP connections to every node with PROXY protocol v2; the nodes
+terminate TLS themselves and see the real client address. haproxy and its agent run on the machine
+itself, as the services `placitum-haproxy` and `placitum-haproxy-agent`, where the machine has them
+or the installer can put them there the same way (`image/host.sh balancer`: haproxy from the
+distribution and the agent out of its image); otherwise haproxy runs as the `balancer` container.
+Its agent takes the configuration from the controller over NATS either way. Going from one node to
+several and back keeps the data: the installer stops what the machine no longer runs and starts the
+rest.
+
+The installer writes `compose/layout.yml` on every run: the installation network, fixed addresses,
+the traffic ports and, with the node on the machine, the addresses the controller writes into the
+node configuration. NATS, both Redis, MinIO, the controller, the forms, the nodes and the haproxy
+container take fixed addresses at the start of the network. PROXY protocol is on for the ports
+`http-8080` and `https-8443`, and the nodes trust it only from haproxy: its container address, or the
+network gateway for haproxy on the machine.
+
+A traffic port created later in the panel needs PROXY protocol too. The panel stays on the first
+node. The haproxy configuration is on the panel page Configuration → haproxy; its entry points
+belong to the installer.
 
 ## Configuration
 
@@ -59,20 +140,27 @@ goes to `install.log` next to `install.sh`; on failure the installer shows its t
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `COMPOSE_PROJECT_NAME` | `placitum` | compose project name; one for both files, otherwise the installer loses track of its own infrastructure |
-| `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | node ports on the host |
+| `PLC_TRAFFIC_BIND` | `0.0.0.0` | traffic addresses on the host: all of them, or addresses of this machine separated by commas |
+| `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | traffic ports on the host |
 | `PLC_PANEL_BIND` | `127.0.0.1` | IPv4 address of the machine the node serves the panel on: `127.0.0.1` for the machine only, an internal interface address for its network, `0.0.0.0` for all addresses |
 | `PLC_PANEL_PORT` | `8081` | panel port on that address |
 | `PLC_CONTROLLER_PORT` | `8080` | controller API without login, on `127.0.0.1` only |
+| `PLC_SUBNET` | a free network | installation network for the containers, /16 to /24; NATS, both Redis, MinIO, the controller, the forms, the nodes and the haproxy container take fixed addresses at its start, the other containers its upper half |
 | `PLC_NODE_ID` | `edge-01` | node name in the panel, heartbeat and audit |
 | `PLC_COOKIE_SECURE` | `off` | `on` sends login gate and captcha cookies over TLS only; keep `off` while the node serves plain HTTP |
-| `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | `waf` / `waf` / `wafwafwaf` | infrastructure credentials; for external databases also change the addresses in `compose/waf.yml` |
+| `POSTGRES_*`, `CLICKHOUSE_*`, `MINIO_ROOT_*` | user `waf`, random passwords | infrastructure credentials, written when `.env` is created; for external databases also change the addresses in `compose/waf.yml` |
+| `PLC_REDIS_EXCHANGE_MB`, `PLC_REDIS_INTERNAL_MB` | `2560`, `512`; on 8 GB or less `640`, `320` | memory of the exchange Redis (request objects waiting for a verdict) and of the internal Redis (configuration, inspector state), MB; Redis keeps 80% for data |
+| `PLC_NODES` | `1` | protection nodes on this machine: one is nginx on the machine itself where it can be, more than one are containers behind haproxy, see [Where the node runs](#where-the-node-runs) |
+| `PLC_NGINX_WORKERS` | `auto` | nginx processes per node, set in the panel by the installer |
+| `PLC_COPIES_<INSPECTOR>` | `1`, `0` for `VLAI` | copies of each inspector; 0 turns it off, `AUTH` needs at least one for the panel login |
+| `PLC_CPUS`, `PLC_CPUS_NATS`, `PLC_CPUS_KEEPER` | `2`, `6`, `4` | CPU cap per service, for NATS and for keeper; the installer lowers them to the number of cores |
+| `PLC_CPUS_EDGE` | nginx processes | CPU cap of a node |
 | `NGINX_VERSION` | `1.28.0` | nginx version for the module and the base image; change both together |
-| `VITE_CONTOUR_FINGERPRINT` | set by `install.sh` | key fingerprint pinned in the panel |
 
 ### `sources.env`
 
 Where each component comes from: a git URL with a branch or tag, or a path on disk. This file is
-the version of the installation. `#master` is the current release branch; production installations use
+the version of the installation. `#rc_1.0.1` is the release candidate; production installations use
 tags. Build contexts have no built-in defaults: a component without a line in `sources.env` does
 not build.
 
@@ -93,15 +181,14 @@ and does nothing else.
 Eight infrastructure services and Placitum itself: the protection node, the controller with the
 panel, logger and search, `crypto`, `geo`, `keeper`, nine inspectors (`ip`, `modsec`, `json`,
 `counter`, `action`, `rewrite`, `cookie`, `auth` with the login form, `captcha` with the widget) and
-three monitoring sidecars. The text classifier `vlai` is behind a compose profile:
+three monitoring sidecars. Each inspector runs in `PLC_COPIES_<INSPECTOR>` copies; an inspector with
+no copies does not run, and neither the panel nor routes see it. The text classifier `vlai` is off
+by default: with `PLC_COPIES_VLAI=1`, `./install.sh reconfigure` builds and starts it.
 
-```sh
-docker compose --env-file .env --env-file sources.env -f compose/waf.yml --profile vlai up -d
-```
-
-Only the node is exposed: traffic (`PLC_HTTP_PORT`) and the panel (`PLC_PANEL_BIND`,
-`PLC_PANEL_PORT`). The controller is published on `127.0.0.1` only. Login forms, the captcha widget,
-search and `crypto` stay inside the network: only the node and the controller talk to them.
+Only traffic and the panel are exposed: the traffic ports on `PLC_TRAFFIC_BIND` and the panel on
+`PLC_PANEL_BIND`, `PLC_PANEL_PORT`. With several nodes the traffic ports belong to haproxy. The
+controller is published on `127.0.0.1` only. Login forms, the captcha widget, search and `crypto`
+stay inside the network: only the node and the controller talk to them.
 
 ## After installation
 
@@ -143,7 +230,7 @@ sets it up through the API from inside the controller container. Running `./inst
 creates only what is missing and keeps operator changes; `admin` is created only when the user list
 is empty. The same run repairs the panel if its server, location or pool was deleted.
 
-The `admin` password is asked at the very start, before the build, twice and without echo. It is
+The `admin` password is asked right after the settings, before the build, twice and without echo. It is
 not stored anywhere: only its bcrypt hash goes to the user list. Press Enter on the first
 installation and the panel step generates a password and shows it once; on later runs the password
 stays the same. Without a terminal the password comes from `PLC_PANEL_PASSWORD` in the environment.
@@ -174,7 +261,15 @@ ssh -L 8080:127.0.0.1:8080 <host>
 ```
 
 Never proxy this port: a host nginx or any reverse proxy in front of `127.0.0.1:8080` exposes the
-API without login again. If you need a proxy, put it in front of the panel port (`PLC_PANEL_PORT`).
+API without login again. If you need a proxy, put it in front of the panel port (`PLC_PANEL_PORT`)
+and make it pass the browser's `Host` (`proxy_set_header Host $host;` in nginx): the controller
+refuses a change whose `Origin` names another host than `Host` does, and answers
+`403 cross_origin`.
+
+A panel session lives 8 hours, is renewed silently and ends for good 24 hours after sign-in
+(`session.max_ttl_s` of the `panel` source). A user removed from `panel_users`, or one whose
+password was changed, is no longer renewed: the session ends when the current token does, 8 hours
+(`session.ttl_s`) after that at the latest.
 
 Do not touch these without emergency access at hand: the login gate on `/` and
 `/agent_health_socket` of the `panel` server, the `panel` source and profile, the last user in
@@ -203,15 +298,17 @@ volume. There is no single upgrade command yet.
 
 ## Pitfalls
 
-- **Ports 80 and 443 are taken** by another service: the installation fails at the node. Change
-  `PLC_HTTP_PORT` and `PLC_HTTPS_PORT` before `install`.
+- **Ports 80 and 443 are taken** by another service: the installation fails at the node. Give other
+  ports when the installer asks, or later with `./install.sh reconfigure`.
+- **The installation network overlaps a network the machine reaches later**, such as a VPN route
+  added after the installation: containers lose that network. Choose another installation network
+  with `./install.sh reconfigure`.
 - **The node name lives in two places**: `PLC_NODE_ID` in `.env` and `waf_node_id` in
   `config/edge/node.conf`. `install.sh` keeps them in sync; if you edit by hand, edit both.
-- **Changed the installation key? Rebuild the controller**: the fingerprint is baked into the panel.
 - **Do not change `COMPOSE_PROJECT_NAME` on a running installation**: a new name means a new
   project, and old containers and volumes stay under the old one.
 - **Windows host (Docker Desktop)**: the bake builder does not understand git source URLs on Windows
-  (`failed to evaluate path "https://…git#master"`). The installation targets Linux; on Windows set
+  (`failed to evaluate path "https://…git#rc_1.0.1"`). The installation targets Linux; on Windows set
   `COMPOSE_BAKE=false` in the environment before `install`.
 - **A secret was edited by hand and a service fails with `permission denied`**: processes in the
   images run as their own users and read the secret file through the mount as is. Files in

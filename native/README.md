@@ -87,8 +87,8 @@ paths move to the process directories. Addresses, ports and credentials are not 
 | Port | What | Address |
 | --- | --- | --- |
 | 80, 8081, 8079 | nginx: traffic, panel, placeholder until the first generation | traffic and panel ports come from the answers |
-| 8080 | controller, API without login | **all addresses**: not configurable |
-| 8091 | search | **all addresses**: only the port is configurable |
+| 8080 | controller, API without login | 127.0.0.1 (`CONTROLLER_HOST`) |
+| 8091 | search | 127.0.0.1 (`SEARCH_HOST`) |
 | 8085, 8086 | login and captcha forms | 127.0.0.1 |
 | 8092, 50051, 8093, 8094 | geo, crypto, keeper | 127.0.0.1 |
 | 4222, 8222 | NATS | 127.0.0.1 |
@@ -96,30 +96,27 @@ paths move to the process directories. Addresses, ports and credentials are not 
 | 5432, 8123, 9000 | PostgreSQL, ClickHouse | localhost |
 | 9100, 9101 | MinIO: API and console | 127.0.0.1 |
 
-The controller and search listen on all addresses and cannot be restricted yet: put a firewall in
-front of them.
+The controller and search have no login, so the installer binds them to 127.0.0.1
+(`CONTROLLER_HOST`, `SEARCH_HOST` in their environment files).
 
 ## Differences from the Docker installation
 
 - **Panel pools use 127.0.0.1 without resolve.** There are no container names, so no Docker resolver
-  is configured. The panel step is built from `bootstrap/panel.mjs` with replacements
-  (`pkg/patch-panel.mjs`); a replacement that does not match exactly once fails the build.
+  is configured: the panel step `bootstrap/panel.mjs` takes the addresses from `PANEL_*` variables.
 - **The shipped `http-8080` port becomes `PLC_HTTP_PORT`.** In a container the node listens on 8080;
   on a single machine 8080 is taken by the controller (`pkg/tune.mjs`).
 - **waf is not a PostgreSQL superuser.** In the postgres image it was. The pgcrypto extension is
   trusted and installed by the database owner; installing it beforehand as postgres breaks the
   schema on `COMMENT ON EXTENSION`.
-- **The key fingerprint pin is replaced during installation.** It is baked into the panel build
-  (`VITE_CONTOUR_FINGERPRINT`), while the machine has its own key. The previous pin is kept in
-  `/usr/lib/placitum/controller/PIN`; root replaces it, the controller process does not write its
-  own files.
+- **The key fingerprint pin is written during installation.** The panel reads it from
+  `/usr/lib/placitum/controller/ux/dist/contour-pin.json`; root writes the machine fingerprint
+  there, the controller process does not write its own files.
 - **Every unit sets `WAF_LOG_WRITER`.** Without containers all processes would share the machine
   name in the logs.
 
 ## Not there yet
 
 - A proxy question: HAProxy in front of nginx comes to the installer together with its support.
-- A firewall for the controller and search.
 - vlai.
 - Upgrades: running `install.sh` again installs new packages but does not restart running processes.
 - TLS on the node and the panel.

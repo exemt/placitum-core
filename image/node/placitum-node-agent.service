@@ -1,0 +1,19 @@
+# Agent of the protection node on this machine: takes generations from the controller over NATS,
+# writes them to /etc/nginx and reloads nginx. install.sh writes the node settings to the
+# environment file and turns the service on for a single node.
+[Unit]
+Description=Placitum node agent: nginx configuration from the controller over NATS
+After=network-online.target nginx.service docker.service
+Wants=network-online.target nginx.service
+
+[Service]
+# Runs as root: it writes to /etc/nginx and signals the nginx master.
+StateDirectory=waf/agent waf/store
+EnvironmentFile=/etc/placitum/node-agent.env
+ExecStart=/usr/local/bin/waf-agent
+# NATS runs in a container and comes up after this service on boot.
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
