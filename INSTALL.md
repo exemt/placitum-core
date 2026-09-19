@@ -167,7 +167,7 @@ belong to the installer.
 ### `sources.env`
 
 Where each component comes from: a git URL with a branch or tag, or a path on disk. This file is
-the version of the installation. `#rc_1.0.1` is the release candidate; production installations use
+the version of the installation. `#rc_1.0.2` is the release candidate; production installations use
 tags. Build contexts have no built-in defaults: a component without a line in `sources.env` does
 not build.
 
@@ -316,7 +316,7 @@ volume. There is no single upgrade command yet.
 - **Do not change `COMPOSE_PROJECT_NAME` on a running installation**: a new name means a new
   project, and old containers and volumes stay under the old one.
 - **Windows host (Docker Desktop)**: the bake builder does not understand git source URLs on Windows
-  (`failed to evaluate path "https://…git#rc_1.0.1"`). The installation targets Linux; on Windows set
+  (`failed to evaluate path "https://…git#rc_1.0.2"`). The installation targets Linux; on Windows set
   `COMPOSE_BAKE=false` in the environment before `install`.
 - **A secret was edited by hand and a service fails with `permission denied`**: processes in the
   images run as their own users and read the secret file through the mount as is. Files in
