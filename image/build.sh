@@ -15,6 +15,7 @@
 # BUILD_ONE_BY_ONE=1 builds the component images one after another instead of all at once, and
 # BUILD_PAUSE runs a command before each of them, such as a wait until the processor cools down:
 # slower, but a small machine does not overheat. VM_CPUS sets the cores of the build machine (4).
+# Steps that need the network are tried BUILD_RETRIES times (3), BUILD_RETRY_PAUSE seconds (30) apart.
 #
 # The host needs Docker, qemu-system-x86_64 with KVM, qemu-img, cloud-localds,
 # ssh and python3. Branches in the sources are resolved to commits, and the image
@@ -32,7 +33,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --sources) sources=$2; shift 2 ;;
         --base) flavour=$2; shift 2 ;;
-        -h|--help|help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help|help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -58,6 +59,19 @@ fi
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '!! %s\n' "$*" >&2; exit 1; }
+
+# A connection to the git host or the registry can drop for a minute: network steps are tried
+# BUILD_RETRIES times (3) with BUILD_RETRY_PAUSE seconds (30) in between.
+retry() {
+    tries=0
+    until "$@"; do
+        tries=$((tries + 1))
+        [ "$tries" -lt "${BUILD_RETRIES:-3}" ] || return 1
+        sleep "${BUILD_RETRY_PAUSE:-30}"
+    done
+}
+
+heads() { git ls-remote "$1" "refs/heads/$2" "refs/tags/$2"; }
 
 for tool in docker qemu-system-x86_64 qemu-img cloud-localds ssh scp ssh-keygen python3 git curl; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found"
@@ -95,7 +109,9 @@ grep '^PLC_SRC_' "$sources" | while IFS='=' read -r name url; do
     sub=""
     case "$rest" in *:*) sub=":${rest#*:}" ;; esac
 
-    sha=$(git ls-remote "$repo" "refs/heads/$ref" "refs/tags/$ref" | head -n 1 | cut -f1)
+    # No such branch or tag means the reference is a commit already; no answer is an error.
+    found=$(retry heads "$repo" "$ref") || die "$name: $repo does not answer"
+    sha=$(printf '%s\n' "$found" | head -n 1 | cut -f1)
     [ -n "$sha" ] || sha=$ref
 
     printf '%s=%s#%s%s\n' "$name" "$repo" "$sha" "$sub" >> "$lock"
@@ -128,7 +144,8 @@ for service, spec in sorted(cfg["services"].items()):
         built = f"placitum-image/{service}"
         names.append(f"  {service}:\n    image: {built}\n")
         retag.append(f"{built} {spec.get('image') or 'placitum-' + service}\n")
-        images.add(built)
+        # A bare name would make docker save take every tag the build host has of it.
+        images.add(f"{built}:latest")
     elif not spec["image"].startswith("placitum/"):
         images.add(spec["image"])
 
@@ -137,10 +154,13 @@ open(sys.argv[3], "w").write("".join(retag))
 open(sys.argv[4], "w").write("".join(f"{i}\n" for i in sorted(images)))
 EOF
 
-build_images() {
+build_once() {
     PLC_VERSION=${PLC_VERSION:-dev} PLC_REVISION=$revision \
-        compose --profile nodes -f "$work/names.yml" build "$@" >> "$work/build.log" 2>&1 ||
-        die "image build failed, log: $work/build.log"
+        compose --profile nodes -f "$work/names.yml" build "$@" >> "$work/build.log" 2>&1
+}
+
+build_images() {
+    retry build_once "$@" || die "image build failed, log: $work/build.log"
 }
 
 : > "$work/build.log"
@@ -162,7 +182,8 @@ fi
 while read -r image; do
     case "$image" in
         placitum-image/*) ;;
-        *) docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image" >/dev/null ;;
+        *) docker image inspect "$image" >/dev/null 2>&1 || retry docker pull -q "$image" >/dev/null ||
+            die "$image: not pulled" ;;
     esac
 done < "$work/images.txt"
 
