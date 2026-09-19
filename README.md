@@ -202,5 +202,7 @@ secrets/        installation keys, not in git
 
 ## License
 
-[Placitum License Agreement](LICENSE.md). A Russian translation is in
-[LICENSE.ru.md](LICENSE.ru.md); the English text is the legally binding one.
+[Apache License 2.0](LICENSE); the attribution notice is in [NOTICE](NOTICE). This repository is
+part of the Placitum open core. The inspectors are licensed separately: each inspector repository
+carries the Placitum License Agreement. Releases made before this change came under the Placitum
+License Agreement 1.1.
