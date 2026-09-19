@@ -397,7 +397,7 @@ check_panel() {
     if [ -f "$env_file" ]; then . "$env_file"; else . "$here/.env.example"; fi
 
     bind=${PLC_PANEL_BIND:-127.0.0.1}
-    port=${PLC_PANEL_PORT:-8081}
+    port=${PLC_PANEL_PORT:-8080}
 
     case "$bind" in
         *:*)
@@ -786,7 +786,7 @@ is_workers() {
     [ "$1" = auto ] || { printf '%s' "$1" | grep -Eq '^[0-9]{1,3}$' && [ "$1" -ge 1 ] && [ "$1" -le 256 ]; }
 }
 
-is_http_port()  { is_port "$1" && [ "$1" != "${PLC_CONTROLLER_PORT:-8080}" ]; }
+is_http_port()  { is_port "$1" && [ "$1" != "${PLC_CONTROLLER_PORT:-8081}" ]; }
 is_https_port() { is_http_port "$1" && [ "$1" != "${PLC_HTTP_PORT:-}" ]; }
 is_panel_port() { is_https_port "$1" && [ "$1" != "${PLC_HTTPS_PORT:-}" ]; }
 
@@ -1018,7 +1018,7 @@ settings() {
     ask_port PLC_HTTP_PORT  is_http_port  80  "HTTP traffic port"
     ask_port PLC_HTTPS_PORT is_https_port 443 "HTTPS traffic port"
     ask PLC_PANEL_BIND is_bind 127.0.0.1 "Panel address: 127.0.0.1 for this machine only, 0.0.0.0 for all addresses, or one address"
-    ask_port PLC_PANEL_PORT is_panel_port 8081 "Panel port"
+    ask_port PLC_PANEL_PORT is_panel_port 8080 "Panel port"
 
     # The network is proposed only when it is asked or missing: the proposal looks at every route.
     subnet=""
@@ -1555,13 +1555,13 @@ panel_run() {
         [ "$edge" != 0.0.0.0 ] || edge=127.0.0.1
 
         docker run --rm -i --network host \
-            -e "CONTROLLER_PORT=${PLC_CONTROLLER_PORT:-8080}" \
-            -e "PANEL_EDGE=http://$edge:${PLC_PANEL_PORT:-8081}" \
+            -e "CONTROLLER_PORT=${PLC_CONTROLLER_PORT:-8081}" \
+            -e "PANEL_EDGE=http://$edge:${PLC_PANEL_PORT:-8080}" \
             -e PANEL_RESOLVER=none \
             -e "PANEL_CONTROLLER_HOST=$(net "$PLC_SUBNET" controller)" \
             -e "PANEL_FORM_HOST=$(net "$PLC_SUBNET" auth)" \
             -e "PANEL_BIND=${PLC_PANEL_BIND:-127.0.0.1}" \
-            -e "PANEL_PORT=${PLC_PANEL_PORT:-8081}" \
+            -e "PANEL_PORT=${PLC_PANEL_PORT:-8080}" \
             "$@" "$image" node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")"
     else
         compose waf.yml exec -T "$@" controller node --input-type=module -e "$(cat "$here/bootstrap/panel.mjs")"
@@ -1583,7 +1583,7 @@ panel() {
             -e "PANEL_COOKIE_SECURE=${PLC_COOKIE_SECURE:-off}" 2>> "$log_file"); then
         printf 'failed\n'
         log_tail
-        die "panel setup failed, log: $log_file; controller directly: http://127.0.0.1:${PLC_CONTROLLER_PORT:-8080}"
+        die "panel setup failed, log: $log_file; controller directly: http://127.0.0.1:${PLC_CONTROLLER_PORT:-8081}"
     fi
 
     printf 'done, %s\n' "$(elapsed "$started")"
@@ -1653,7 +1653,7 @@ layout_run() {
         -e "LAYOUT_NODES=${nodes# }" \
         -e "LAYOUT_NODE=$node" \
         -e "LAYOUT_RESOLVER=$resolver" \
-        -e "LAYOUT_PANEL=${PLC_PANEL_BIND:-127.0.0.1} ${PLC_PANEL_PORT:-8081}" \
+        -e "LAYOUT_PANEL=${PLC_PANEL_BIND:-127.0.0.1} ${PLC_PANEL_PORT:-8080}" \
         -e "LAYOUT_BALANCER=$balancer" \
         -e "LAYOUT_TRUST=$trust" \
         -e "LAYOUT_BIND=$bind" \
@@ -1738,7 +1738,7 @@ summary() {
     # shellcheck disable=SC1090
     . "$env_file"
     bind=${PLC_PANEL_BIND:-127.0.0.1}
-    port=${PLC_PANEL_PORT:-8081}
+    port=${PLC_PANEL_PORT:-8080}
 
     printf '\n'
 
@@ -1752,7 +1752,7 @@ summary() {
 
     printf 'login:   %s, change the password with %s panel-password\n' "${PLC_PANEL_LOGIN:-admin}" "$cli"
     printf 'API:     http://127.0.0.1:%s, no login, this machine only (from elsewhere use ssh -L)\n' \
-        "${PLC_CONTROLLER_PORT:-8080}"
+        "${PLC_CONTROLLER_PORT:-8081}"
     printf 'traffic: %s, ports %s and %s\n' "${PLC_TRAFFIC_BIND:-0.0.0.0}" "${PLC_HTTP_PORT:-80}" "${PLC_HTTPS_PORT:-443}"
 
     if [ "$(node_place)" = host ] && [ -n "${PLC_SUBNET:-}" ]; then

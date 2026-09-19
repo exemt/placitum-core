@@ -48,18 +48,18 @@ and shows the end of the log. The full log is written to `install.log`.
 
 At the end the installer shows the addresses. By default:
 
-- panel: http://127.0.0.1:8081, user `admin`
+- panel: http://127.0.0.1:8080, user `admin`
 - application traffic: ports 80 and 443 on every address of the machine
-- controller API: http://127.0.0.1:8080
+- controller API: http://127.0.0.1:8081
 
 The panel is only reachable from the machine itself. From another machine, the easiest way is an SSH
 tunnel:
 
 ```sh
-ssh -L 8081:127.0.0.1:8081 user@server
+ssh -L 8080:127.0.0.1:8080 user@server
 ```
 
-The panel then opens at http://127.0.0.1:8081 on your side.
+The panel then opens at http://127.0.0.1:8080 on your side.
 
 Right after installation the panel has a single server: the panel itself. How to create the first
 route and check that traffic goes through Placitum is described in
@@ -95,7 +95,7 @@ describes every variable. The ones changed most often:
 | `PLC_TRAFFIC_BIND` | `0.0.0.0` | traffic addresses; `0.0.0.0` means all, or addresses of this machine separated by commas |
 | `PLC_HTTP_PORT`, `PLC_HTTPS_PORT` | `80`, `443` | ports for application traffic |
 | `PLC_PANEL_BIND` | `127.0.0.1` | machine address the panel listens on; `0.0.0.0` means all addresses |
-| `PLC_PANEL_PORT` | `8081` | panel port |
+| `PLC_PANEL_PORT` | `8080` | panel port |
 | `PLC_NODE_ID` | `edge-01` | node name in the panel and the log |
 | `PLC_SUBNET` | a free network | network for the containers; it must not overlap the networks of the machine |
 | `PLC_INFRA_PORTS` | `none` | `loopback` opens the databases, NATS and MinIO on 127.0.0.1 for access from the machine |
@@ -113,10 +113,10 @@ installation: nodes, inspectors and processes are added or removed without losin
 `sources.env` has one line per component: the repository address and a branch or tag.
 
 ```
-PLC_SRC_CONTROLLER=https://github.com/exemt/placitum-controller.git#rc_1.0.1
+PLC_SRC_CONTROLLER=https://github.com/exemt/placitum-controller.git#rc_1.0.2
 ```
 
-Every component comes from its `rc_1.0.1` branch, the release candidate. Once releases exist, a tag
+Every component comes from its `rc_1.0.2` branch, the release candidate. Once releases exist, a tag
 such as `#v1.2.0` can be used instead of a branch, and this one file then pins the version of the
 whole installation.
 
@@ -131,7 +131,7 @@ cp sources.env sources.local.env
 
 ## Security
 
-- The controller API on `127.0.0.1:8080` has no login. Do not expose it and do not put a proxy in
+- The controller API on `127.0.0.1:8081` has no login. Do not expose it and do not put a proxy in
   front of it. For access from another machine, use an SSH tunnel.
 - Docker publishes ports around UFW and other firewalls on the machine. Only `PLC_PANEL_BIND`
   decides who can reach the panel.
@@ -202,5 +202,7 @@ secrets/        installation keys, not in git
 
 ## License
 
-[Placitum License Agreement](LICENSE.md). A Russian translation is in
-[LICENSE.ru.md](LICENSE.ru.md); the English text is the legally binding one.
+[Apache License 2.0](LICENSE); the attribution notice is in [NOTICE](NOTICE). This repository is
+part of the Placitum open core. The inspectors are licensed separately: each inspector repository
+carries the Placitum License Agreement. Releases made before this change came under the Placitum
+License Agreement 1.1.
