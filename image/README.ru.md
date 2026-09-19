@@ -25,6 +25,9 @@ Docker, загружает образы, ставит на машину nginx и
 `BUILD_PAUSE` выполняет команду перед каждым образом: `BUILD_PAUSE="sh image/cool.sh"` ждёт, пока
 процессор остынет ниже 70 градусов (`COOL_BELOW`).
 
+Шаги, которым нужна сеть (ветки в коммиты, исходники компонентов, скачивание образов), пробуются
+трижды с паузой 30 секунд: `BUILD_RETRIES` и `BUILD_RETRY_PAUSE`.
+
 Сборочной машине нужны Docker, `qemu-system-x86_64` с доступом к `/dev/kvm` (группа `kvm`),
 `qemu-img`, `cloud-localds` из cloud-image-utils, `ssh`, `curl` и `python3`, а ещё интернет: пакеты
 Debian и Docker ставятся из их репозиториев.

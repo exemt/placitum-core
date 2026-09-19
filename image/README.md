@@ -25,6 +25,9 @@ images one after another and give the build machine two cores: `BUILD_ONE_BY_ONE
 image/build.sh`. `BUILD_PAUSE` runs a command before each image: `BUILD_PAUSE="sh image/cool.sh"`
 waits until the processor is below 70 degrees (`COOL_BELOW`).
 
+Steps that need the network (branches to commits, component sources, image pulls) are tried three
+times, 30 seconds apart: `BUILD_RETRIES` and `BUILD_RETRY_PAUSE`.
+
 The build machine needs Docker, `qemu-system-x86_64` with access to `/dev/kvm` (the `kvm` group),
 `qemu-img`, `cloud-localds` from cloud-image-utils, `ssh`, `curl` and `python3`, and internet access:
 Debian and Docker packages are installed from their repositories.
