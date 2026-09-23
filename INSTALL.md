@@ -135,9 +135,14 @@ container take fixed addresses at the start of the network. PROXY protocol is on
 `http-8080` and `https-8443`, and the nodes trust it only from haproxy: its container address, or the
 network gateway for haproxy on the machine.
 
-A traffic port created later in the panel needs PROXY protocol too. The panel stays on the first
-node. The haproxy configuration is on the panel page Configuration → haproxy; its entry points
-belong to the installer.
+The entry points of haproxy follow the ports of the panel: every port the nodes serve to the
+network gets one, except the panel port, which stays on the first node. A traffic port created
+later in the panel appears on the page Configuration → haproxy at once and reaches haproxy with the
+next send from there; turn PROXY protocol on for it, or the nodes see the address of haproxy
+instead of the client. haproxy on the machine listens on the new port itself; the `balancer`
+container publishes only the HTTP and HTTPS ports of the installer. The installer writes only
+where haproxy listens: the traffic addresses of the machine and the traffic ports in front of the
+node ports.
 
 ## Configuration
 

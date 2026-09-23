@@ -255,7 +255,8 @@ the node after `POST config/send`.
 
 A server carries `nginx` and `waf` documents: the first is nginx behaviour (real ip, proxy headers,
 timeouts), the second is protection — which inspectors run there and with which profiles. A location
-carries the same two, plus its handler: `proxy` to an upstream, or a return.
+carries the same two, plus its handler: `proxy` to an upstream, `static` with a file of the space
+(`static_file`, the name of a content dataset), or a return.
 
 `raw: true` on a space, server or location means its text is written by hand in `raw_nginx` and the
 controller only checks that the configuration compiles.
@@ -507,12 +508,22 @@ nobody listens to, for instance.
 | `GET`, `PUT /api/<scope>/agent` | node agent settings, with the hash of what they compile to |
 | `POST /api/<scope>/agent/send` | publish them |
 | `GET /api/<scope>/agent/desired` | the published generation |
-| `GET`, `PUT /api/<scope>/haproxy` | balancer settings |
+| `GET`, `PUT /api/<scope>/haproxy` | balancer settings; the answer also carries `entries`, the entry points derived from the ports of the space |
 | `GET /api/<scope>/haproxy/preview` | the `haproxy.cfg` they compile to, as text |
 | `POST /api/<scope>/haproxy/send` | publish them |
 | `GET /api/<scope>/haproxy/desired` | the published generation |
 
 A send that changes nothing keeps the revision it had and simply confirms the generation.
+
+The balancer listens on every port of the space that the nodes serve to the network, except the
+panel port and ports on the loopback; a change in the ports makes the `haproxy` channel stale like
+a change in the settings does. A TLS port and a port with PROXY protocol pass through in tcp mode,
+a plain port is spoken to in HTTP. Nodes are checked by TCP connect unless `backend.check.path` names
+a health path for the plain ports. The settings say only where haproxy listens: `entry.addresses`,
+the addresses of the machine, and `entry.ports`, the entry port in front of a node port when the
+two differ (`{"8080": 80}`); the installer writes both. A port of the space with the same number as
+such an entry port is not fronted and says so in `entries` (`taken`). `backend.servers` are the nodes by name and
+address; the port comes from the entry point.
 
 ## Audit and logs
 

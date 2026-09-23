@@ -37,8 +37,8 @@ const PROXY = NODES.length > 1;
 // haproxy maps the traffic ports to them; on the host nginx listens on the traffic ports themselves,
 // on the one traffic address or on all of them.
 const TRAFFIC = [
-  { kind: "http", port: 8080, ssl: false, frontend: "http", entry: HTTP_PORT },
-  { kind: "https", port: 8443, ssl: true, frontend: "https", entry: HTTPS_PORT },
+  { kind: "http", port: 8080, ssl: false, entry: HTTP_PORT },
+  { kind: "https", port: 8443, ssl: true, entry: HTTPS_PORT },
 ].map((row) => ({
   ...row,
   name: `${row.kind}-${NODE_HOST ? row.entry : row.port}`,
@@ -258,21 +258,35 @@ if (panel !== undefined) {
 const haproxy = (await api("GET", `${base}/haproxy`)).settings ?? {};
 
 if (PROXY) {
-  // Nodes by their fixed addresses: haproxy on the host has no Docker DNS, and the container does
-  // not need it.
+  // The entry points come from the ports of the panel. On the machine haproxy listens on the
+  // traffic addresses and ports in front of the node ports; in a container it listens on the node
+  // ports, and Docker maps the traffic ports to them. Nodes by their fixed addresses: haproxy on
+  // the host has no Docker DNS, and the container does not need it.
+  const entry = {};
+
+  if (HOST && BIND.length > 0) {
+    entry.addresses = BIND;
+  }
+
+  if (HOST) {
+    const mapped = TRAFFIC.filter((row) => row.entry !== row.port).map((row) => [row.port, row.entry]);
+
+    if (mapped.length > 0) {
+      entry.ports = Object.fromEntries(mapped);
+    }
+  }
+
   const next = {
     ...haproxy,
-    frontends: TRAFFIC.map((row) => ({
-      name: row.frontend,
-      port: HOST ? row.entry : row.port,
-      mode: "tcp",
-      ...(HOST ? { server_port: row.port } : {}),
-      send_proxy: true,
-      ...(HOST && BIND.length > 0 ? { addresses: BIND } : {}),
-    })),
     backend: { ...(haproxy.backend ?? {}), servers: NODES.map((node) => ({ name: node.name, host: node.address })) },
     docker_dns: false,
   };
+
+  if (Object.keys(entry).length > 0) {
+    next.entry = entry;
+  } else {
+    delete next.entry;
+  }
 
   // The stats page of haproxy on the host would listen on every address of the machine.
   if (HOST) {
@@ -288,9 +302,9 @@ if (PROXY) {
 
   // The controller holds the configuration before haproxy on the host starts and reads it.
   await api("POST", `${base}/haproxy/send`, {});
-} else if (haproxy.frontends !== undefined) {
+} else if (haproxy.entry !== undefined || haproxy.backend?.servers !== undefined) {
   const next = { ...haproxy };
-  delete next.frontends;
+  delete next.entry;
 
   if (next.backend !== undefined) {
     next.backend = { ...next.backend };
