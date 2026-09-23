@@ -15,7 +15,7 @@ Detailed instructions are in [INSTALL.md](INSTALL.md).
 ## Requirements
 
 - Linux, Docker 24+ and Docker Compose 2.20+
-- at least 2 cores and 4 GB of RAM ([what that holds](image/README.md#sizing)); 8 cores and 16 GB
+- at least 2 cores and 4 GB of RAM ([measured load](image/README.md#sizing)); 8 cores and 16 GB
   for heavy traffic; 4 GB more with the `vlai` text classifier
 - 20 GB of free disk space
 - `openssl`
@@ -116,9 +116,8 @@ installation: nodes, inspectors and processes are added or removed without losin
 PLC_SRC_CONTROLLER=https://github.com/exemt/placitum-controller.git#rc_1.0.2
 ```
 
-Every component comes from its `rc_1.0.2` branch, the release candidate. Once releases exist, a tag
-such as `#v1.2.0` can be used instead of a branch, and this one file then pins the version of the
-whole installation.
+Every component comes from its `rc_1.0.2` branch, the release candidate. A tag can stand in place
+of a branch, and this one file then pins the version of the whole installation.
 
 To build a component from your own copy of the sources, copy `sources.env`, replace the address with
 a path to the directory in the copy and pass the file to the installer. Paths are relative to the
@@ -192,17 +191,16 @@ image/          ready virtual machine image
 secrets/        installation keys, not in git
 ```
 
-## Not there yet
+## Limits
 
-- Nodes on other machines: several nodes run on one machine only.
-- Upgrades with a single command.
-- Prebuilt images in a registry: the installer builds from sources, only the virtual machine image
-  carries built images.
-- Kubernetes manifests.
+All nodes of an installation run on one machine. The installer builds every image from sources;
+only the virtual machine image ships built ones. There is no upgrade path yet: when a new version
+changes the database schema, the installation is done again on an empty database. There are no
+Kubernetes manifests.
 
 ## License
 
 [Apache License 2.0](LICENSE); the attribution notice is in [NOTICE](NOTICE). This repository is
 part of the Placitum open core. The inspectors are licensed separately: each inspector repository
-carries the Placitum License Agreement. Releases made before this change came under the Placitum
+carries the Placitum License Agreement. Versions up to 1.0.1 were released under the Placitum
 License Agreement 1.1.

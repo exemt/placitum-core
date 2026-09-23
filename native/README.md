@@ -101,25 +101,23 @@ The controller and search have no login, so the installer binds them to 127.0.0.
 
 ## Differences from the Docker installation
 
-- **Panel pools use 127.0.0.1 without resolve.** There are no container names, so no Docker resolver
+- Panel pools use 127.0.0.1 without resolve. There are no container names, so no Docker resolver
   is configured: the panel step `bootstrap/panel.mjs` takes the addresses from `PANEL_*` variables.
-- **The shipped `http-8080` port becomes `PLC_HTTP_PORT`.** In a container the node listens on 8080;
+- The shipped `http-8080` port becomes `PLC_HTTP_PORT`. In a container the node listens on 8080;
   on a single machine 8080 is taken by the controller (`pkg/tune.mjs`).
-- **waf is not a PostgreSQL superuser.** In the postgres image it was. The pgcrypto extension is
+- The `waf` role is not a PostgreSQL superuser. The pgcrypto extension is
   trusted and installed by the database owner; installing it beforehand as postgres breaks the
   schema on `COMMENT ON EXTENSION`.
-- **The key fingerprint pin is written during installation.** The panel reads it from
+- The key fingerprint pin is written during installation. The panel reads it from
   `/usr/lib/placitum/controller/ux/dist/contour-pin.json`; root writes the machine fingerprint
   there, the controller process does not write its own files.
-- **Every unit sets `WAF_LOG_WRITER`.** Without containers all processes would share the machine
+- Every unit sets `WAF_LOG_WRITER`. Without containers all processes would share the machine
   name in the logs.
 
-## Not there yet
+## Limits
 
-- A proxy question: HAProxy in front of nginx comes to the installer together with its support.
-- vlai.
-- Upgrades: running `install.sh` again installs new packages but does not restart running processes.
-- TLS on the node and the panel.
-- A ready machine image built by this installer.
-- A MinIO replacement: since October 2025 it ships as source only, and it was archived in February
-  2026.
+The installer has no proxy question yet; HAProxy in front of nginx comes together with its support.
+`vlai` is not packaged. Running `install.sh` again installs new packages but does not restart running
+processes. There is no TLS on the node or the panel, and this installer builds no machine image.
+MinIO ships as source only since October 2025 and was archived in February 2026, so it needs a
+replacement.
