@@ -20,7 +20,9 @@ ExecStart=/usr/sbin/haproxy -Ws -S /run/placitum-haproxy/master.sock,mode,600 -f
 ExecReload=/bin/kill -USR2 $MAINPID
 Restart=always
 RestartSec=2s
-LimitNOFILE=100000
+# Two descriptors per connection: the panel allows maxconn far above the default of 4096, and a
+# limit haproxy cannot raise to fails the whole load.
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target

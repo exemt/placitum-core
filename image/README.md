@@ -3,8 +3,9 @@
 English · [Русский](README.ru.md)
 
 A ready virtual machine: Debian 13, Docker, every Placitum image, and nginx with the module and
-haproxy with their agents as services of the machine. The image has nothing installed yet. The first boot asks the settings on the console and creates keys and passwords of
-its own, so machines made from one image do not share secrets.
+haproxy with their agents as services of the machine. Placitum is set up on the first boot: the
+machine asks the settings on the console and creates keys and passwords of its own, so machines
+made from one image do not share secrets.
 
 ## Building
 
@@ -20,7 +21,7 @@ Docker there, loads the images, puts nginx and haproxy with their agents on the 
 `image/work/placitum-<revision>.qcow2`, about 2 GB. Branches from `sources.env` are resolved to
 commits, and the image lists them in `/opt/placitum/image/MANIFEST`.
 
-The build loads every core of the machine. On a small machine that overheats, build the component
+The build uses all cores of the machine. On a small machine that overheats, build the component
 images one after another and give the build machine two cores: `BUILD_ONE_BY_ONE=1 VM_CPUS=2 sh
 image/build.sh`. `BUILD_PAUSE` runs a command before each image: `BUILD_PAUSE="sh image/cool.sh"`
 waits until the processor is below 70 degrees (`COOL_BELOW`).
@@ -63,9 +64,8 @@ prompt and the address of the machine on the serial console, and powers the mach
 itself is not written to. It shows whether the kernel found the disk and the network adapter,
 whether ssh started and whether the first boot service began.
 
-The adapter gets a random hardware address on every run. That is the point: a network
-configuration tied to the adapter of the build machine works there and nowhere else, and only a
-different address brings it out.
+The adapter gets a random hardware address on every run, to catch a network configuration tied to
+the adapter of the build machine: such a configuration works there and nowhere else.
 
 ```sh
 sh image/check.sh kvm    image/work/placitum-<revision>.qcow2   # virtio, BIOS
@@ -78,6 +78,8 @@ sh image/check.sh sata   placitum-<revision>-disk1.vmdk         # after a move t
 The check machine needs `qemu-system-x86_64` with KVM, `qemu-img`, `python3` and, for `hyperv`,
 the OVMF firmware from the `ovmf` package. This is a boot check, not an installation: the whole
 first boot with the installation is checked on KVM with an answers file, see [First boot](#first-boot).
+Hyper-V, VirtualBox and VMware themselves were not tried: the VHDX and the OVA disk were booted
+under QEMU with the devices those hypervisors present.
 
 A release is the three commands in a row: `build.sh`, `export.sh`, `check.sh` for each file, then
 the files with their `sha256sum`.
@@ -185,13 +187,9 @@ The processor runs out first. Memory stays at 1.3 GB free or more under load. Th
 term limit: every request leaves about 270 bytes in ClickHouse, the audit is kept for 90 days and
 the log for 14. At a constant 100 requests per second that is about 2.3 GB a day.
 
-## Not there yet
+## Limits
 
-- Hyper-V, VirtualBox and VMware were not tried themselves: the VHDX and the OVA disk were booted
-  under QEMU with UEFI and with an LSI Logic controller and an E1000 adapter, the devices those
-  hypervisors present.
-- Upgrades: a new version is a new machine.
-- External S3 instead of the local MinIO in the settings.
-- The `vlai` classifier: the image has neither its image nor the model, and the installation does
-  not offer it.
-- HTTPS for the panel: over plain HTTP the password travels in clear text.
+A new version is a new machine; there is no upgrade in place. The settings offer the local MinIO
+only, without an external S3. The image carries neither the `vlai` image nor its model, and the
+installation does not offer it. The panel is served over plain HTTP, so the password travels in
+clear text.
