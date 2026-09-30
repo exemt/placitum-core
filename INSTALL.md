@@ -9,7 +9,7 @@ A quick start and the repository layout are in [README.md](README.md).
 
 | What | How much |
 | --- | --- |
-| Docker | 24 or newer, with BuildKit |
+| Docker | 28 or newer, with BuildKit; an older engine works, but before 28 containers are reachable around the published ports, and the installer warns |
 | Docker Compose | 2.20 or newer: the installation relies on `include` |
 | CPU and memory | at least 2 cores and 4 GB, see [the measurements](image/README.md#sizing); 8 cores and 16 GB for heavy traffic; 4 GB more with `vlai` |
 | Disk | 20 GB for images, build caches and data; the body archive grows over time |
